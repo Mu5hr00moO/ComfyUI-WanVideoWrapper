@@ -8,7 +8,7 @@ import hashlib
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .wanvideo.modules.model import rope_params
-from .fp8_optimization import convert_linear_with_lora_and_scale
+from .fp8_optimization import convert_linear_with_lora_and_scale, remove_lora_from_module
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
 
 from .multitalk.multitalk import timestep_transform, add_noise
@@ -159,11 +159,11 @@ class WanVideoTextEncode:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "t5": ("WANTEXTENCODER",),
             "positive_prompt": ("STRING", {"default": "", "multiline": True} ),
             "negative_prompt": ("STRING", {"default": "", "multiline": True} ),
             },
             "optional": {
+                "t5": ("WANTEXTENCODER",),
                 "force_offload": ("BOOLEAN", {"default": True}),
                 "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
                 "use_disk_cache": ("BOOLEAN", {"default": False, "tooltip": "Cache the text embeddings to disk for faster re-use, under the custom_nodes/ComfyUI-WanVideoWrapper/text_embed_cache directory"}),
@@ -177,27 +177,53 @@ class WanVideoTextEncode:
     DESCRIPTION = "Encodes text prompts into text embeddings. For rudimentary prompt travel you can input multiple prompts separated by '|', they will be equally spread over the video length"
 
 
-    def process(self, t5, positive_prompt, negative_prompt, force_offload=True, model_to_offload=None, use_disk_cache=False):
+    def process(self, positive_prompt, negative_prompt, t5=None, force_offload=True, model_to_offload=None, use_disk_cache=False):
+        if t5 is None and not use_disk_cache:
+            raise ValueError("T5 encoder is required for text encoding. Please provide a valid T5 encoder or enable disk cache.")
+
+        # Prepare cache directory if needed
         if use_disk_cache:
-            # Prepare cache directory
             cache_dir = os.path.join(script_directory, 'text_embed_cache')
             os.makedirs(cache_dir, exist_ok=True)
 
-            # Build a unique cache key from all relevant inputs
-            encoder_id = str(t5["name"])
-            dtype_str = str(t5["dtype"])
-            cache_key = f"{encoder_id}|{positive_prompt}|{negative_prompt}|{dtype_str}"
-            cache_hash = hashlib.sha256(cache_key.encode('utf-8')).hexdigest()
-            cache_path = os.path.join(cache_dir, f"{cache_hash}.pt")
+            # Use unified cache key for any prompt
+            def get_cache_path(prompt):
+                cache_key = prompt.strip()
+                cache_hash = hashlib.sha256(cache_key.encode('utf-8')).hexdigest()
+                return os.path.join(cache_dir, f"{cache_hash}.pt")
 
-            # Try to load from cache
-            if os.path.exists(cache_path):
+            context = None
+            context_null = None
+
+            pos_cache_path = get_cache_path(positive_prompt)
+            neg_cache_path = get_cache_path(negative_prompt)
+
+            # Try to load positive prompt embeds
+            if os.path.exists(pos_cache_path):
                 try:
-                    log.info(f"Loading text embeds from cache: {cache_path}")
-                    prompt_embeds_dict = torch.load(cache_path)
-                    return (prompt_embeds_dict,)
+                    log.info(f"Loading prompt embeds from cache: {pos_cache_path}")
+                    context = torch.load(pos_cache_path)
                 except Exception as e:
                     log.warning(f"Failed to load cache: {e}, will re-encode.")
+
+            # Try to load negative prompt embeds
+            if os.path.exists(neg_cache_path):
+                try:
+                    log.info(f"Loading prompt embeds from cache: {neg_cache_path}")
+                    context_null = torch.load(neg_cache_path)
+                except Exception as e:
+                    log.warning(f"Failed to load cache: {e}, will re-encode.")
+
+            # If both loaded, return combined
+            if context is not None and context_null is not None:
+                prompt_embeds_dict = {
+                    "prompt_embeds": context,
+                    "negative_prompt_embeds": context_null,
+                }
+                return (prompt_embeds_dict,)
+
+        if t5 is None:
+            raise ValueError("No cached text embeds found for prompts, please provide a T5 encoder.")
 
         if model_to_offload is not None:
             log.info(f"Moving video model to {offload_device}")
@@ -219,15 +245,23 @@ class WanVideoTextEncode:
         encoder.model.to(device)
 
         with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=True):
-            context = encoder(positive_prompts, device)
-            context_null = encoder([negative_prompt], device)
+            # Encode positive if not loaded from cache
+            if use_disk_cache and context is not None:
+                pass
+            else:
+                context = encoder(positive_prompts, device)
+                # Apply weights to embeddings if any were extracted
+                for i, weights in enumerate(all_weights):
+                    for text, weight in weights.items():
+                        log.info(f"Applying weight {weight} to prompt: {text}")
+                        if len(weights) > 0:
+                            context[i] = context[i] * weight
 
-            # Apply weights to embeddings if any were extracted
-            for i, weights in enumerate(all_weights):
-                for text, weight in weights.items():
-                    log.info(f"Applying weight {weight} to prompt: {text}")
-                    if len(weights) > 0:
-                        context[i] = context[i] * weight
+            # Encode negative if not loaded from cache
+            if use_disk_cache and context_null is not None:
+                pass
+            else:
+                context_null = encoder([negative_prompt], device)
 
         if force_offload:
             encoder.model.to(offload_device)
@@ -238,10 +272,18 @@ class WanVideoTextEncode:
             "negative_prompt_embeds": context_null,
         }
 
+        # Save each part to its own cache file if needed
         if use_disk_cache:
             try:
-                torch.save(prompt_embeds_dict, cache_path)
-                log.info(f"Saved text embeds to cache: {cache_path}")
+                if not os.path.exists(pos_cache_path):
+                    torch.save(context, pos_cache_path)
+                    log.info(f"Saved prompt embeds to cache: {pos_cache_path}")
+            except Exception as e:
+                log.warning(f"Failed to save cache: {e}")
+            try:
+                if not os.path.exists(neg_cache_path):
+                    torch.save(context_null, neg_cache_path)
+                    log.info(f"Saved prompt embeds to cache: {neg_cache_path}")
             except Exception as e:
                 log.warning(f"Failed to save cache: {e}")
 
@@ -271,12 +313,13 @@ class WanVideoTextEncodeSingle:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "t5": ("WANTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
             },
             "optional": {
+                "t5": ("WANTEXTENCODER",),
                 "force_offload": ("BOOLEAN", {"default": True}),
                 "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "Model to move to offload_device before encoding"}),
+                "use_disk_cache": ("BOOLEAN", {"default": False, "tooltip": "Cache the text embeddings to disk for faster re-use, under the custom_nodes/ComfyUI-WanVideoWrapper/text_embed_cache directory"}),
             }
         }
 
@@ -286,28 +329,58 @@ class WanVideoTextEncodeSingle:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Encodes text prompt into text embedding."
 
-    def process(self, t5, prompt, force_offload=True, model_to_offload=None):
-        if model_to_offload is not None:
-            log.info(f"Moving video model to {offload_device}")
-            model_to_offload.model.to(offload_device)
-            mm.soft_empty_cache()
+    def process(self, prompt, t5=None, force_offload=True, model_to_offload=None, use_disk_cache=False):
+        # Unified cache logic: use a single cache file per unique prompt
+        encoded = None
+        if use_disk_cache:
+            cache_dir = os.path.join(script_directory, 'text_embed_cache')
+            os.makedirs(cache_dir, exist_ok=True)
+            def get_cache_path(prompt):
+                cache_key = prompt.strip()
+                cache_hash = hashlib.sha256(cache_key.encode('utf-8')).hexdigest()
+                return os.path.join(cache_dir, f"{cache_hash}.pt")
+            cache_path = get_cache_path(prompt)
+            if os.path.exists(cache_path):
+                try:
+                    log.info(f"Loading prompt embeds from cache: {cache_path}")
+                    encoded = torch.load(cache_path)
+                except Exception as e:
+                    log.warning(f"Failed to load cache: {e}, will re-encode.")
 
-        encoder = t5["model"]
-        dtype = t5["dtype"]
+        if t5 is None and encoded is None:
+            raise ValueError("No cached text embeds found for prompts, please provide a T5 encoder.")
 
-        encoder.model.to(device)
-       
-        with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=True):
-            encoded = encoder([prompt], device)
+        if encoded is None:
+            if model_to_offload is not None:
+                log.info(f"Moving video model to {offload_device}")
+                model_to_offload.model.to(offload_device)
+                mm.soft_empty_cache()
 
-        if force_offload:
-            encoder.model.to(offload_device)
-            mm.soft_empty_cache()
+            encoder = t5["model"]
+            dtype = t5["dtype"]
+
+            encoder.model.to(device)
+           
+            with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=True):
+                encoded = encoder([prompt], device)
+
+            if force_offload:
+                encoder.model.to(offload_device)
+                mm.soft_empty_cache()
+
+            # Save to cache if enabled
+            if use_disk_cache:
+                try:
+                    if not os.path.exists(cache_path):
+                        torch.save(encoded, cache_path)
+                        log.info(f"Saved prompt embeds to cache: {cache_path}")
+                except Exception as e:
+                    log.warning(f"Failed to save cache: {e}")
 
         prompt_embeds_dict = {
-                "prompt_embeds": encoded,
-                "negative_prompt_embeds": None,
-            }
+            "prompt_embeds": encoded,
+            "negative_prompt_embeds": None,
+        }
         return (prompt_embeds_dict,)
     
 class WanVideoApplyNAG:
@@ -1036,8 +1109,9 @@ class WanVideoContextOptions:
             "edge_padding_frames": ("INT", {"default": -1, "min": -1, "max": 128, "step": 1, "tooltip": "Frames for reflection padding. -1=auto (50% of context), 0=off."}),
             },
             "optional": {
-                "fuse_method": (["linear", "pyramid", "gaussian"], {"default": "gaussian"}),
                 "prompt_blend_ratio": ("FLOAT", {"default": 1.0, "min": -1.0, "max": 10.0, "step": 0.1, "tooltip": "Controls prompt blending curve. -1.0 disables this feature."}),
+                "fuse_method": (["linear", "pyramid"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
+                "reference_latent": ("LATENT", {"tooltip": "Image to be used as init for I2V models for windows where first frame is not the actual first frame. Mostly useful with MAGREF model"}),
             }
         }
 
@@ -1047,7 +1121,8 @@ class WanVideoContextOptions:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Context options for WanVideo, allows splitting the video into context windows and attemps blending them for longer generations than the model and memory otherwise would allow."
 
-    def process(self, context_schedule, context_frames, context_stride, context_overlap, prompt_blend_ratio, freenoise, verbose, edge_padding_frames, fuse_method="gaussian"):
+
+    def process(self, context_schedule, context_frames, context_stride, context_overlap, prompt_blend_ratio, freenoise, verbose, edge_padding_frames, image_cond_start_step=6, image_cond_window_count=2, vae=None, fuse_method="gaussian", reference_latent=None):
         """Packages all UI inputs into a single dictionary for the sampler."""
         context_options = {
             "context_schedule":context_schedule,
@@ -1059,6 +1134,7 @@ class WanVideoContextOptions:
             "verbose":verbose,
             "fuse_method":fuse_method,
             "edge_padding_frames":edge_padding_frames
+            "reference_latent":reference_latent["samples"][0] if reference_latent is not None else None,
         }
         return (context_options,)
     
@@ -1212,7 +1288,9 @@ class WanVideoSampler:
 
         if len(patcher.patches) != 0 and transformer_options.get("linear_with_lora", False) is True:
             log.info(f"Using {len(patcher.patches)} patches for WanVideo model")
-            convert_linear_with_lora_and_scale(transformer, patches=patcher.patches)            
+            convert_linear_with_lora_and_scale(transformer, patches=patcher.patches)
+        else:
+            remove_lora_from_module(transformer)
 
         #compile
         compile_args = model["compile_args"]
@@ -1415,7 +1493,7 @@ class WanVideoSampler:
                     image_cond = control_latents.to(device)
                     if not patcher.model.is_patched:
                         log.info("Re-loading control LoRA...")
-                        patcher = apply_lora(patcher, device, device, low_mem_load=False)
+                        patcher = apply_lora(patcher, device, device, low_mem_load=False, control_lora=True)
                         patcher.model.is_patched = True
                 else:
                     if transformer.in_dim not in [48, 32]:
@@ -1540,14 +1618,16 @@ class WanVideoSampler:
 
         # Context windows
         is_looped = False
-        if context_options is not None:            
+        context_reference_latent = None
+        if context_options is not None:
             context_schedule = context_options["context_schedule"]
             context_frames =  (context_options["context_frames"] - 1) // 4 + 1
             context_stride = context_options["context_stride"] // 4
             context_overlap = context_options["context_overlap"] // 4
-            context_vae = context_options.get("vae", None)
-            if context_vae is not None:
-                context_vae.to(device)
+            # context_vae = context_options.get("vae", None)
+            # if context_vae is not None:
+            #     context_vae.to(device)
+            context_reference_latent = context_options.get("reference_latent", None)
 
             # Get total number of prompts
             num_prompts = len(text_embeds["prompt_embeds"])
@@ -1885,7 +1965,7 @@ class WanVideoSampler:
                             image_cond_input = control_latents.to(z)
                             if not patcher.model.is_patched:
                                 log.info("Loading LoRA...")
-                                patcher = apply_lora(patcher, device, device, low_mem_load=False)
+                                patcher = apply_lora(patcher, device, device, low_mem_load=False, control_lora=True)
                                 patcher.model.is_patched = True
                                 
                 elif ATI_tracks is not None and ((ati_start_percent <= current_step_percentage <= ati_end_percent) or 
@@ -2441,7 +2521,21 @@ class WanVideoSampler:
                         partial_control_latents = None
                         if image_cond is not None:
                             partial_img_emb = image_cond[:, c]
-                            partial_img_emb[:, 0] = image_cond[:, 0].to(intermediate_device)
+                            
+                            if c[0] != 0 and context_reference_latent is not None:
+                                new_init_image = context_reference_latent[:, 0].to(intermediate_device)
+                                # Concatenate the first 4 channels of partial_img_emb with new_init_image to match the required shape
+                                if new_init_image.shape[0] + 4 == partial_img_emb.shape[0]:
+                                    partial_img_emb[:, 0] = torch.cat([
+                                        image_cond[:4, 0],
+                                        new_init_image
+                                    ], dim=0)
+                                else:
+                                    # fallback to original assignment if shape matches
+                                    partial_img_emb[:, 0] = new_init_image
+                            else:
+                                new_init_image = image_cond[:, 0].to(intermediate_device)
+                                partial_img_emb[:, 0] = new_init_image
 
                             if control_latents is not None:
                                 partial_control_latents = control_latents[:, c]

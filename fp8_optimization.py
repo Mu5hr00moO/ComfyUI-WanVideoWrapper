@@ -107,6 +107,12 @@ def convert_linear_with_lora_and_scale(module, scale_weight_keys=None, patches=N
                 has_scale = hasattr(submodule, "scale_weight")
                 has_lora = hasattr(submodule, "lora")
                 if has_scale or has_lora:
-                    original_forward = submodule.forward
-                    setattr(submodule, "original_forward", original_forward)
+                    original_forward_ = submodule.forward
+                    setattr(submodule, "original_forward_", original_forward_)
                     setattr(submodule, "forward", lambda input, m=submodule: linear_with_lora_and_scale_forward(m, input))
+
+
+def remove_lora_from_module(module):
+    for name, submodule in module.named_modules():
+        if hasattr(submodule, "lora"):
+            delattr(submodule, "lora")

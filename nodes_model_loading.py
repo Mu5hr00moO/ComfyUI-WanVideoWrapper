@@ -111,6 +111,9 @@ def standardize_lora_key_format(lora_sd):
             k = k.replace('transformer.', 'diffusion_model.')
         if k.startswith('pipe.dit.'): #unianimate-dit/diffsynth
             k = k.replace('pipe.dit.', 'diffusion_model.')
+        if k.startswith('blocks.'):
+            k = k.replace('blocks.', 'diffusion_model.blocks.')
+        k = k.replace('.default.', '.')
 
         # Fun LoRA format
         if k.startswith('lora_unet__'):
@@ -629,8 +632,10 @@ class WanVideoSetLoRAs:
             "required": 
             {
                 "model": ("WANVIDEOMODEL", ),
-                "lora": ("WANVIDLORA", ),
             },
+            "optional": {
+                "lora": ("WANVIDLORA", ),
+            }
         }
 
     RETURN_TYPES = ("WANVIDEOMODEL",)
@@ -640,7 +645,7 @@ class WanVideoSetLoRAs:
     EXPERIMENTAL = True
     DESCRIPTION = "Sets the LoRA weights to be used directly in linear layers of the model, this does NOT merge LoRAs"
 
-    def setlora(self, model, lora):
+    def setlora(self, model, lora=None):
         if lora is None:
             return (model,)
         
@@ -1080,7 +1085,7 @@ class WanVideoModelLoader:
             
             if not gguf and not "scaled" in quantization and merge_loras:
                 log.info("Patching LoRA to the model...")
-                patcher = apply_lora(patcher, device, transformer_load_device, params_to_keep=params_to_keep, dtype=dtype, base_dtype=base_dtype, state_dict=sd, low_mem_load=lora_low_mem_load)
+                patcher = apply_lora(patcher, device, transformer_load_device, params_to_keep=params_to_keep, dtype=dtype, base_dtype=base_dtype, state_dict=sd, low_mem_load=lora_low_mem_load, control_lora=control_lora)
         
         if gguf:
             #from diffusers.quantizers.gguf.utils import _replace_with_gguf_linear, GGUFParameter

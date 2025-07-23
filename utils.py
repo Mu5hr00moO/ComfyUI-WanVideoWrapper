@@ -2,7 +2,7 @@ import importlib.metadata
 import torch
 import logging
 from tqdm import tqdm
-import types
+import types, collections
 from comfy.utils import ProgressBar, copy_to_param, set_attr_param
 from comfy.model_patcher import get_key_weight, string_to_seed
 from comfy.lora import calculate_weight
@@ -42,12 +42,15 @@ def get_tensor_memory(tensor):
     memory_bytes = tensor.element_size() * tensor.nelement()
     return f"{memory_bytes / (1024 * 1024):.2f} MB"
 
-def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
+def patch_weight_to_device(self, key, device_to=None, inplace_update=False, backup_keys=False):
     if key not in self.patches:
         return
-
+    
     weight, set_func, convert_func = get_key_weight(self.model, key)
     inplace_update = self.weight_inplace_update or inplace_update
+
+    if backup_keys and key not in self.backup:
+        self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
 
     if device_to is not None:
         temp_weight = cast_to_device(weight, device_to, torch.float32, copy=True)
@@ -66,7 +69,7 @@ def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
     else:
         set_func(out_weight, inplace_update=inplace_update, seed=string_to_seed(key))
 
-def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, dtype=None, base_dtype=None, state_dict=None, low_mem_load=False):
+def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, dtype=None, base_dtype=None, state_dict=None, low_mem_load=False, control_lora=False):
         model.patch_weight_to_device = types.MethodType(patch_weight_to_device, model)
         to_load = []
         for n, m in model.model.named_modules():
@@ -104,10 +107,9 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                     except:
                         continue
                 if low_mem_load:
-                    model.patch_weight_to_device("{}.{}".format(name, param), device_to=device_to, inplace_update=True)
+                    model.patch_weight_to_device("{}.{}".format(name, param), device_to=device_to, inplace_update=True, backup_keys=control_lora)
                 else:
-                    model.patch_weight_to_device("{}.{}".format(name, param), device_to=device_to)
-                    model.backup["{}.{}".format(name, param)] = None
+                    model.patch_weight_to_device("{}.{}".format(name, param), device_to=device_to, backup_keys=control_lora)
                     if device_to != transformer_load_device:
                         set_module_tensor_to_device(m, param, device=transformer_load_device)
                 if low_mem_load:

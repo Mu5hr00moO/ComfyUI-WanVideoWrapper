@@ -619,13 +619,10 @@ class WanAttentionBlock(nn.Module):
     @torch.compiler.disable()
     def get_mod(self, e):
         if e.dim() == 3:
-            modulation = self.modulation  # 1, 6, dim
-            e = (modulation.to(e.device) + e).chunk(6, dim=1)
+            return (self.modulation  + e).chunk(6, dim=1) # 1, 6, dim
         elif e.dim() == 4:
-            modulation = self.modulation.unsqueeze(2)  # 1, 6, 1, dim
-            e = (modulation.to(e.device) + e).chunk(6, dim=1)
-            e = [ei.squeeze(1) for ei in e]
-        return e
+            e = (self.modulation.unsqueeze(2) + e).chunk(6, dim=1) # 1, 6, 1, dim
+            return [ei.squeeze(1) for ei in e]
     
     def modulate(self, x, shift_msa, scale_msa):
         return torch.addcmul(shift_msa, x, 1 + scale_msa)
@@ -684,7 +681,7 @@ class WanAttentionBlock(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         #e = (self.modulation.to(e.device) + e).chunk(6, dim=1)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.get_mod(e)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.get_mod(e.to(x.device))
         input_x = self.modulate(self.norm1(x), shift_msa, scale_msa)
 
         if camera_embed is not None:
@@ -917,13 +914,10 @@ class Head(nn.Module):
 
     def get_mod(self, e):
         if e.dim() == 2:
-            modulation = self.modulation.to(e.device)  # 1, 2, dim
-            e = (modulation + e.unsqueeze(1)).chunk(2, dim=1)
+            return (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
         elif e.dim() == 3:
-            modulation = self.modulation.to(e.device).unsqueeze(2)  # 1, 2, seq, dim
-            e = (modulation + e.unsqueeze(1)).chunk(2, dim=1)
-            e = [ei.squeeze(1) for ei in e]
-        return e
+            e = (self.modulation.unsqueeze(2) + e.unsqueeze(1)).chunk(2, dim=1)
+            return [ei.squeeze(1) for ei in e]
 
     def forward(self, x, e):
         r"""
@@ -932,7 +926,7 @@ class Head(nn.Module):
             e(Tensor): Shape [B, C]
         """
 
-        e = self.get_mod(e)
+        e = self.get_mod(e.to(x.device))
         x = self.head(self.norm(x).mul_(1 + e[1]).add_(e[0]))
         return x
 
