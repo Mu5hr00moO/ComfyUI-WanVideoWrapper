@@ -184,52 +184,52 @@ def get_total_steps(
         for i in range(len(timesteps))
     )
 
-def create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=False, window_type="linear"):
+"""
+    Creates a blending mask for a context window to allow for smooth transitions.
+    """
+    # If there is no overlap, return a mask of ones immediately
+    if context_overlap == 0:
+        return torch.ones_like(noise_pred_context)
+    
     window_mask = torch.ones_like(noise_pred_context)
+    length = noise_pred_context.shape[1]
+    device = noise_pred_context.device
+    dtype = noise_pred_context.dtype
     
     if window_type == "pyramid":
-        # Create pyramid weights that peak in the middle
-        length = noise_pred_context.shape[1]
+        # Pyramid (triangular) weights, peaking in the middle of the window.
         if length % 2 == 0:
             max_weight = length // 2
-            weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
+            weight_sequence = list(range(1, max_weight + 1)) + list(range(max_weight, 0, -1))
         else:
             max_weight = (length + 1) // 2
-            weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
+            weight_sequence = list(range(1, max_weight)) + [max_weight] + list(range(max_weight - 1, 0, -1))
         
-        # Normalize weights to range from 0 to 1
-        max_val = max(weight_sequence)
-        weight_sequence = [w / max_val for w in weight_sequence]
-        
-        # Apply the weights to create the mask
-        weights_tensor = torch.tensor(weight_sequence, device=noise_pred_context.device)
-        weights_tensor = weights_tensor.view(1, -1, 1, 1)
+        weights = torch.tensor(weight_sequence, device=device, dtype=dtype) / max(weight_sequence)
+        weights_tensor = weights.view(1, -1, 1, 1)
         window_mask = weights_tensor.expand_as(window_mask).clone()
         
-        # Adjust for position in sequence if needed
-        if not looped:
-            if min(c) == 0:  # First chunk
-                left_ramp = torch.linspace(0, 1, context_overlap, device=noise_pred_context.device).view(1, -1, 1, 1)
-                # Clone to avoid in-place memory conflict
-                left_section = window_mask[:, :context_overlap].clone()
-                window_mask[:, :context_overlap] = torch.maximum(left_section, left_ramp)
-                
-            if max(c) == latent_video_length - 1:  # Last chunk
-                right_ramp = torch.linspace(1, 0, context_overlap, device=noise_pred_context.device).view(1, -1, 1, 1)
-                # Clone to avoid in-place memory conflict
-                right_section = window_mask[:, -context_overlap:].clone()
-                window_mask[:, -context_overlap:] = torch.maximum(right_section, right_ramp)
-    else:  # Original "linear" window masking
-        # Apply left-side blending for all except first chunk (or always in loop mode)
+    elif window_type == "gaussian":
+        # Gaussian (bell curve) weights.
+        if length == 1:
+            return torch.ones_like(noise_pred_context)
+        n = torch.arange(length, device=device, dtype=dtype)
+        center = (length - 1) / 2.0
+        sigma_val = sigma * center
+        if sigma_val < 1e-6:
+            sigma_val = 1e-6
+        exponent = -0.5 * torch.pow((n - center) / sigma_val, 2)
+        weights = torch.exp(exponent)
+        weights_tensor = weights.view(1, -1, 1, 1)
+        window_mask = weights_tensor.expand_as(noise_pred_context)
+
+    else:  # Default "linear" window masking (trapezoid shape).
         if min(c) > 0 or (looped and max(c) == latent_video_length - 1):
-            ramp_up = torch.linspace(0, 1, context_overlap, device=noise_pred_context.device)
-            ramp_up = ramp_up.view(1, -1, 1, 1)
+            ramp_up = torch.linspace(0, 1, context_overlap, device=device, dtype=dtype).view(1, -1, 1, 1)
             window_mask[:, :context_overlap] = ramp_up
             
-        # Apply right-side blending for all except last chunk (or always in loop mode)
         if max(c) < latent_video_length - 1 or (looped and min(c) == 0):
-            ramp_down = torch.linspace(1, 0, context_overlap, device=noise_pred_context.device)
-            ramp_down = ramp_down.view(1, -1, 1, 1)
+            ramp_down = torch.linspace(1, 0, context_overlap, device=device, dtype=dtype).view(1, -1, 1, 1)
             window_mask[:, -context_overlap:] = ramp_down
             
     return window_mask
