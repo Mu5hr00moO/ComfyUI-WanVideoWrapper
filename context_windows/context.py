@@ -184,7 +184,7 @@ def get_total_steps(
         for i in range(len(timesteps))
     )
 
-"""
+    """
     Creates a blending mask for a context window to allow for smooth transitions.
     """
     # If there is no overlap, return a mask of ones immediately
