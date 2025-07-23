@@ -2,6 +2,7 @@ import numpy as np
 from typing import Callable, Optional, List
 import torch
 from ..utils import log
+from typing import Callable, Optional, List, Generator
 
 def ordered_halving(val):
     bin_str = f"{val:064b}"
@@ -146,16 +147,109 @@ def static_standard(
             break
         windows.append(list(range(start_idx, start_idx + context_size)))
     return windows
+    
+def progressive(
+    step: int,
+    num_steps: Optional[int],
+    num_frames: int,
+    context_size: Optional[int],
+    context_stride: int = 4,
+    context_overlap: int = 4,
+    **kwargs,
+) -> Generator[List[int], None, None]:
+    """
+    Generates windows in two passes: a coarse pass with large strides for global
+    consistency, followed by a fine pass with smaller, overlapping windows for detail.
+    """
+    if num_frames <= context_size:
+        yield list(range(num_frames))
+        return
+
+    windows = []
+    
+    # Coarse Pass: large, mostly non-overlapping windows
+    delta_coarse = context_size
+    for start_idx in range(0, num_frames, delta_coarse):
+        ending = start_idx + context_size
+        if ending > num_frames:
+            start_idx = num_frames - context_size
+        windows.append(list(range(start_idx, start_idx + context_size)))
+
+    # Fine Pass: standard overlapping windows
+    delta_fine = max(1, context_size - context_overlap)
+    for start_idx in range(0, num_frames, delta_fine):
+        ending = start_idx + context_size
+        if ending >= num_frames:
+            final_start_idx = num_frames - context_size
+            windows.append(list(range(final_start_idx, final_start_idx + context_size)))
+            break
+        windows.append(list(range(start_idx, start_idx + context_size)))
+
+    # Remove duplicates, sort, and yield
+    unique_windows_tuples = sorted(list(set(tuple(w) for w in windows)))
+    for w_tuple in unique_windows_tuples:
+        yield list(w_tuple)
+        
+def meet_in_the_middle(
+    step: int,
+    num_steps: Optional[int],
+    num_frames: int,
+    context_size: Optional[int],
+    context_stride: int = 4,
+    context_overlap: int = 4,
+    **kwargs,
+) -> Generator[List[int], None, None]:
+    """
+    Experimental scheduler that generates windows from the start towards the middle,
+    and from the end towards the middle, meeting in the center.
+    """
+    if num_frames <= context_size:
+        yield list(range(num_frames))
+        return
+
+    windows = []
+    delta = max(1, context_size - context_overlap)
+    midpoint = num_frames // 2
+
+    # Forward pass from the beginning
+    start_idx = 0
+    while start_idx + context_size <= midpoint + context_size // 2:
+        windows.append(list(range(start_idx, start_idx + context_size)))
+        start_idx += delta
+
+    # Backward pass from the end
+    start_idx = num_frames - context_size
+    while start_idx >= midpoint - context_size // 2:
+        windows.append(list(range(start_idx, start_idx + context_size)))
+        start_idx -= delta
+        if start_idx < 0:
+            break
+            
+    # Ensure the very first and last windows are always included
+    windows.append(list(range(0, context_size)))
+    windows.append(list(range(num_frames - context_size, num_frames)))
+
+    # Clean up, remove duplicates, sort, and yield
+    unique_windows_tuples = sorted(list(set(tuple(w) for w in windows)))
+    for w_tuple in unique_windows_tuples:
+        yield list(w_tuple)       
 
 def get_context_scheduler(name: str) -> Callable:
-    if name == "uniform_looped":
-        return uniform_looped
-    elif name == "uniform_standard":
-        return uniform_standard
-    elif name == "static_standard":
-        return static_standard
-    else:
-        raise ValueError(f"Unknown context_overlap policy {name}")
+    """Factory function to select a context scheduler by name."""
+    schedulers = {
+        "uniform_looped": uniform_looped,
+        "uniform_standard": uniform_standard,
+        "static_standard": static_standard,
+        "progressive": progressive,
+        "meet_in_the_middle": meet_in_the_middle,
+    }
+    
+    scheduler_func = schedulers.get(name)
+    
+    if scheduler_func is None:
+        raise ValueError(f"Unknown context scheduler named '{name}'.")
+        
+    return scheduler_func
 
 
 def get_total_steps(
@@ -184,9 +278,14 @@ def get_total_steps(
         for i in range(len(timesteps))
     )
 
+def create_window_mask(
+    noise_pred_context: torch.Tensor, c: List[int], latent_video_length: int, context_overlap: int,
+    looped: bool = False, window_type: str = "linear", sigma: float = 0.4, alpha: float = 0.5
+) -> torch.Tensor:
     """
     Creates a blending mask for a context window to allow for smooth transitions.
     """
+
     # If there is no overlap, return a mask of ones immediately
     if context_overlap == 0:
         return torch.ones_like(noise_pred_context)

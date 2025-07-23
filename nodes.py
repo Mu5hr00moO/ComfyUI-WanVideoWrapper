@@ -1027,15 +1027,17 @@ class WanVideoContextOptions:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "context_schedule": (["uniform_standard", "uniform_looped", "static_standard"],),
+            "context_schedule": (["static_standard", "uniform_standard", "uniform_looped", "progressive", "meet_in_the_middle"],),
             "context_frames": ("INT", {"default": 81, "min": 2, "max": 1000, "step": 1, "tooltip": "Number of pixel frames in the context, NOTE: the latent space has 4 frames in 1"} ),
             "context_stride": ("INT", {"default": 4, "min": 4, "max": 100, "step": 1, "tooltip": "Context stride as pixel frames, NOTE: the latent space has 4 frames in 1"} ),
             "context_overlap": ("INT", {"default": 16, "min": 4, "max": 100, "step": 1, "tooltip": "Context overlap as pixel frames, NOTE: the latent space has 4 frames in 1"} ),
             "freenoise": ("BOOLEAN", {"default": True, "tooltip": "Shuffle the noise"}),
             "verbose": ("BOOLEAN", {"default": False, "tooltip": "Print debug output"}),
+            "edge_padding_frames": ("INT", {"default": -1, "min": -1, "max": 128, "step": 1, "tooltip": "Frames for reflection padding. -1=auto (50% of context), 0=off."}),
             },
             "optional": {
-                "fuse_method": (["linear", "pyramid", "gaussian"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
+                "fuse_method": (["linear", "pyramid", "gaussian"], {"default": "gaussian"}),
+                "prompt_blend_ratio": ("FLOAT", {"default": 1.0, "min": -1.0, "max": 10.0, "step": 0.1, "tooltip": "Controls prompt blending curve. -1.0 disables this feature."}),
             }
         }
 
@@ -1045,17 +1047,19 @@ class WanVideoContextOptions:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Context options for WanVideo, allows splitting the video into context windows and attemps blending them for longer generations than the model and memory otherwise would allow."
 
-    def process(self, context_schedule, context_frames, context_stride, context_overlap, freenoise, verbose, image_cond_start_step=6, image_cond_window_count=2, vae=None, fuse_method="linear"):
+    def process(self, context_schedule, context_frames, context_stride, context_overlap, prompt_blend_ratio, freenoise, verbose, edge_padding_frames, fuse_method="gaussian"):
+        """Packages all UI inputs into a single dictionary for the sampler."""
         context_options = {
             "context_schedule":context_schedule,
             "context_frames":context_frames,
             "context_stride":context_stride,
             "context_overlap":context_overlap,
+            "prompt_blend_ratio":prompt_blend_ratio,
             "freenoise":freenoise,
             "verbose":verbose,
-            "fuse_method":fuse_method
+            "fuse_method":fuse_method,
+            "edge_padding_frames":edge_padding_frames
         }
-
         return (context_options,)
     
     
@@ -2214,6 +2218,35 @@ class WanVideoSampler:
 
             #region main loop start
             for idx, t in enumerate(tqdm(timesteps)):
+                
+                # --- START: REFLECTION PADDING LOGIC ---
+                padding_latent_frames = 0
+                original_latent_video_length = latent_video_length
+                
+                if context_options is not None:
+                    padding_pixel_frames = context_options.get("edge_padding_frames", -1)
+                    
+                    # Auto mode: calculate padding based on context_frames
+                    if padding_pixel_frames == -1:
+                        ctx_frames_for_auto = context_options.get("context_frames", 81)
+                        # Calculate as half of context, rounded to nearest multiple of 4
+                        padding_pixel_frames = (round(ctx_frames_for_auto / 2) // 4) * 4
+
+                    # Check if padding is enabled (value is greater than 0)
+                    if padding_pixel_frames > 0:
+                        padding_latent_frames = max(1, round(padding_pixel_frames / 4))
+                        
+                        if context_options.get("verbose", False):
+                            log.info(f"Applying Reflection Padding: {padding_latent_frames} latent frames.")
+                        
+                        prefix_to_reflect = latent[:, :padding_latent_frames, :, :]
+                        reflected_prefix = torch.flip(prefix_to_reflect, dims=[1]) # Flip along the time dimension
+                        
+                        latent = torch.cat([reflected_prefix, latent], dim=1)
+                        
+                        latent_video_length = latent.shape[1]
+                # --- END: REFLECTION PADDING LOGIC ---
+                
                 if flowedit_args is not None:
                     if idx < skip_steps:
                         continue
@@ -2472,6 +2505,15 @@ class WanVideoSampler:
                         counter[:, c] += window_mask
                         context_pbar.update_absolute(step_start_progress + (i + 1) * fraction_per_context, steps)
                     noise_pred /= counter
+                    
+                    # --- START: SLICING LOGIC (TRIM PADDING) ---
+                    if padding_latent_frames > 0:
+                        if context_options.get("verbose", False):
+                            log.info(f"Slicing off reflection padding: {padding_latent_frames} frames.")
+                        
+                        noise_pred = noise_pred[:, padding_latent_frames:]
+                    # --- END: SLICING LOGIC ---
+                    
                 #region multitalk
                 elif multitalk_sampling:
                     original_image = cond_image = image_embeds.get("multitalk_start_image", None)
@@ -2743,29 +2785,49 @@ class WanVideoSampler:
                     
                 
                 if flowedit_args is None:
+                    # Restore the original length before the scheduler step
+                    latent_video_length = original_latent_video_length
+                    
                     latent = latent.to(intermediate_device)
+                    
+                    # --- START: SLICING FOR SCHEDULER STEP ---
+                    if padding_latent_frames > 0:
+                        # Ensure the scheduler step operates on the original, unpadded length
+                        latent_for_step = latent[:, padding_latent_frames:]
+                    else:
+                        latent_for_step = latent
+                    # --- END: SLICING FOR SCHEDULER STEP ---
+                        
                     temp_x0 = sample_scheduler.step(
                         noise_pred[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else noise_pred.unsqueeze(0),
                         timestep,
-                        latent[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else latent.unsqueeze(0),
+                        latent_for_step[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else latent_for_step.unsqueeze(0),
                         **scheduler_step_args)[0]
                     latent = temp_x0.squeeze(0)
 
                     x0 = latent.to(device)
                     
+                    # This is the original, unchanged line before the block to be replaced
                     if freeinit_args is not None:
                         current_latent = x0.clone()
 
                     if callback is not None:
+                        # Determine which latent to use for the callback preview
+                        latent_for_callback = latent_model_input
+                        if padding_latent_frames > 0:
+                            latent_for_callback = latent_model_input[:, padding_latent_frames:]
+
                         if recammaster is not None:
-                            callback_latent = (latent_model_input[:, :orig_noise_len].to(device) - noise_pred[:, :orig_noise_len].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
+                            callback_latent = (latent_for_callback[:, :orig_noise_len].to(device) - noise_pred[:, :orig_noise_len].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
                         elif phantom_latents is not None:
-                            callback_latent = (latent_model_input[:,:-phantom_latents.shape[1]].to(device) - noise_pred[:,:-phantom_latents.shape[1]].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
+                            callback_latent = (latent_for_callback[:,:-phantom_latents.shape[1]].to(device) - noise_pred[:,:-phantom_latents.shape[1]].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
                         else:
-                            callback_latent = (latent_model_input.to(device) - noise_pred.to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
+                            callback_latent = (latent_for_callback.to(device) - noise_pred.to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
                         callback(idx, callback_latent, None, steps)
                     else:
                         pbar.update(1)
+
+                    # This is the original, unchanged line after the block
                     del latent_model_input, timestep
                 else:
                     if callback is not None:
