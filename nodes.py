@@ -1035,7 +1035,7 @@ class WanVideoContextOptions:
             "verbose": ("BOOLEAN", {"default": False, "tooltip": "Print debug output"}),
             },
             "optional": {
-                "fuse_method": (["linear", "pyramid"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
+                "fuse_method": (["linear", "pyramid", "gaussian"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
             }
         }
 
