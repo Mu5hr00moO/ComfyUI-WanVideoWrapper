@@ -42,7 +42,7 @@ def get_tensor_memory(tensor):
     memory_bytes = tensor.element_size() * tensor.nelement()
     return f"{memory_bytes / (1024 * 1024):.2f} MB"
 
-def patch_weight_to_device(self, key, device_to=None, inplace_update=False, backup_keys=False):
+def patch_weight_to_device(self, key, device_to=None, inplace_update=False, backup_keys=False, scale_weight=None):
     if key not in self.patches:
         return
     
@@ -59,7 +59,11 @@ def patch_weight_to_device(self, key, device_to=None, inplace_update=False, back
     if convert_func is not None:
         temp_weight = convert_func(temp_weight, inplace=True)
 
+    if scale_weight is not None:
+        temp_weight = temp_weight * scale_weight.to(temp_weight.device, temp_weight.dtype)
+
     out_weight = calculate_weight(self.patches[key], temp_weight, key)
+    
     if set_func is None:
         out_weight = stochastic_rounding(out_weight, weight.dtype, seed=string_to_seed(key))
         if inplace_update:
@@ -69,7 +73,7 @@ def patch_weight_to_device(self, key, device_to=None, inplace_update=False, back
     else:
         set_func(out_weight, inplace_update=inplace_update, seed=string_to_seed(key))
 
-def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, dtype=None, base_dtype=None, state_dict=None, low_mem_load=False, control_lora=False):
+def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, dtype=None, base_dtype=None, state_dict=None, low_mem_load=False, control_lora=False, scale_weights={}):
         model.patch_weight_to_device = types.MethodType(patch_weight_to_device, model)
         to_load = []
         for n, m in model.model.named_modules():
@@ -99,17 +103,18 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                     dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
                     if "patch_embedding" in name:
                         dtype_to_use = torch.float32
-                    if name.startswith("diffusion_model."):
-                        name_no_prefix = name[len("diffusion_model."):]
-                    key = "{}.{}".format(name_no_prefix, param)
+                    key = f"{name.replace('diffusion_model.', '')}.{param}"
                     try:
                         set_module_tensor_to_device(model.model.diffusion_model, key, device=transformer_load_device, dtype=dtype_to_use, value=state_dict[key])
                     except:
                         continue
+                key = f"{name}.{param}"
+                if scale_weights is not None:
+                    scale_key = key.replace("weight", "scale_weight").replace("diffusion_model.", "") if "weight" in key else None
                 if low_mem_load:
-                    model.patch_weight_to_device("{}.{}".format(name, param), device_to=device_to, inplace_update=True, backup_keys=control_lora)
+                    model.patch_weight_to_device(f"{name}.{param}", device_to=device_to, inplace_update=True, backup_keys=control_lora, scale_weight=scale_weights.get(scale_key, None))
                 else:
-                    model.patch_weight_to_device("{}.{}".format(name, param), device_to=device_to, backup_keys=control_lora)
+                    model.patch_weight_to_device(f"{name}.{param}", device_to=device_to, backup_keys=control_lora, scale_weight=scale_weights.get(scale_key, None))
                     if device_to != transformer_load_device:
                         set_module_tensor_to_device(m, param, device=transformer_load_device)
                 if low_mem_load:
