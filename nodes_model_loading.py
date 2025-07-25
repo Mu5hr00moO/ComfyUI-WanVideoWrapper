@@ -106,6 +106,13 @@ def filter_state_dict_by_blocks(state_dict, blocks_mapping, layer_filter=[]):
 def standardize_lora_key_format(lora_sd):
     new_sd = {}
     for k, v in lora_sd.items():
+        # aitoolkit/lycoris format
+        k = k.replace("lycoris_blocks_", "blocks.")
+        k = k.replace("_cross_attn_", ".cross_attn.")
+        k = k.replace("_self_attn_", ".self_attn.")
+        k = k.replace("_ffn_net_0_proj", ".ffn.0")
+        k = k.replace("_ffn_net_2", ".ffn.2")
+        k = k.replace("to_out_0", "o")
         # Diffusers format
         if k.startswith('transformer.'):
             k = k.replace('transformer.', 'diffusion_model.')
