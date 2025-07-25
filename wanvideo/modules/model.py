@@ -282,7 +282,7 @@ class WanSelfAttention(nn.Module):
         v = self.v(x).view(b, s, n, d)
         return q, k, v
 
-    def forward(self, q, k, v, seq_lens, block_mask=None):
+    def forward(self, q, k, v, seq_lens, attention_mode_override=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -290,52 +290,48 @@ class WanSelfAttention(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
+        attention_mode = self.attention_mode
+        if attention_mode_override is not None:
+            attention_mode = attention_mode_override
 
-        if self.attention_mode == 'flex_attention':
-            padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
-            padded_roped_query = torch.cat(
-                [q, torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
-                             device=q.device, dtype=v.dtype)], dim=1
-                )
+        x = attention(q, k, v, k_lens=seq_lens, attention_mode=attention_mode)
+        return self.o(x.flatten(2))
+    
+    
+    def forward_flex(self, q, k, v, block_mask=None):
+        padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
+        padded_roped_query = torch.cat(
+            [q, torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
+                            device=q.device, dtype=v.dtype)], dim=1
+            )
 
-            padded_roped_key = torch.cat(
-                [k, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
-                                        device=k.device, dtype=v.dtype)], dim=1
-                )
+        padded_roped_key = torch.cat(
+            [k, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
+                                    device=k.device, dtype=v.dtype)], dim=1
+            )
 
-            padded_v = torch.cat(
-                [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
-                                device=v.device, dtype=v.dtype)],  dim=1
-                )
+        padded_v = torch.cat(
+            [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
+                            device=v.device, dtype=v.dtype)],  dim=1
+            )
 
-            x = flex_attention(
-                query=padded_roped_query.transpose(2, 1),
-                key=padded_roped_key.transpose(2, 1),
-                value=padded_v.transpose(2, 1),
-                block_mask=block_mask
-            )[:, :, :-padded_length].transpose(2, 1)
-        else:                
-            x = attention(
-                q, k, v,
-                k_lens=seq_lens,
-                attention_mode=self.attention_mode
-                )
+        x = flex_attention(
+            query=padded_roped_query.transpose(2, 1),
+            key=padded_roped_key.transpose(2, 1),
+            value=padded_v.transpose(2, 1),
+            block_mask=block_mask
+        )[:, :, :-padded_length].transpose(2, 1)
 
-        # output
-        x = x.flatten(2)
-        x = self.o(x)
-
-        return x
+        return self.o(x.flatten(2))
+    
     
     def forward_radial(self, q, k, v, dense_step=False):
         if dense_step:
             x = RadialSpargeSageAttnDense(q, k, v, self.mask_map)
         else:
             x = RadialSpargeSageAttn(q, k, v, self.mask_map, decay_factor=self.decay_factor)
-
-        x = self.o(x.flatten(2))
-
-        return x
+        return self.o(x.flatten(2))
+    
     
     def forward_multitalk(self, q, k, v, seq_lens, grid_sizes, ref_target_masks):
         x = attention(
@@ -351,6 +347,7 @@ class WanSelfAttention(nn.Module):
         x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0], ref_target_masks=ref_target_masks)
 
         return x, x_ref_attn_map
+    
     
     def forward_split(self, q, k, v, seq_lens, grid_sizes, freqs, seq_chunks=1,current_step=0, video_attention_split_steps = []):
         r"""
@@ -656,6 +653,7 @@ class WanAttentionBlock(nn.Module):
         context,
         context_lens,
         current_step,
+        last_step=False,
         video_attention_split_steps=[],
         clip_embed=None,
         camera_embed=None,
@@ -728,11 +726,18 @@ class WanAttentionBlock(nn.Module):
                 if self.dense_attention_mode == "sparse_sage_attn":
                     y = self.self_attn.forward_radial(q, k, v, dense_step=True)
                 else:
-                    y = self.self_attn.forward(q, k, v, seq_lens, block_mask=block_mask)
+                    y = self.self_attn.forward(q, k, v, seq_lens)
             else:
                 y = self.self_attn.forward_radial(q, k, v, dense_step=False)
+        elif self.attention_mode == "flex_attention":
+            y = self.self_attn.forward_flex(q, k, v, block_mask=block_mask)
+        elif self.attention_mode == "sageattn_3":
+            if current_step != 0 and not last_step:
+                y = self.self_attn.forward(q, k, v, seq_lens, attention_mode_override="sageattn_3")
+            else:
+                y = self.self_attn.forward(q, k, v, seq_lens, attention_mode_override="sageattn")
         else:
-            y = self.self_attn.forward(q, k, v, seq_lens, block_mask=block_mask)
+            y = self.self_attn.forward(q, k, v, seq_lens)
 
         # FETA
         if enhance_enabled:
@@ -1333,6 +1338,7 @@ class WanModel(ModelMixin, ConfigMixin):
         is_uncond=False,
         current_step_percentage=0.0,
         current_step=0,
+        last_step=0,
         total_steps=50,
         clip_fea=None,
         y=None,
@@ -1734,6 +1740,7 @@ class WanModel(ModelMixin, ConfigMixin):
                 context_lens=context_lens,
                 clip_embed=clip_embed,
                 current_step=current_step,
+                last_step=last_step,
                 video_attention_split_steps=self.video_attention_split_steps,
                 camera_embed=camera_embed,
                 audio_proj=audio_proj,

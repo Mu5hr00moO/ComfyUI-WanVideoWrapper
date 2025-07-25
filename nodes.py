@@ -2072,6 +2072,7 @@ class WanVideoSampler:
                     'freqs': freqs,
                     't': timestep,
                     'current_step': idx,
+                    'last_step': len(timesteps) - 1 == idx,
                     'control_lora_enabled': control_lora_enabled,
                     'enhance_enabled': enhance_enabled,
                     'camera_embed': camera_embed,

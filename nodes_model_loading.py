@@ -107,12 +107,13 @@ def standardize_lora_key_format(lora_sd):
     new_sd = {}
     for k, v in lora_sd.items():
         # aitoolkit/lycoris format
-        k = k.replace("lycoris_blocks_", "blocks.")
-        k = k.replace("_cross_attn_", ".cross_attn.")
-        k = k.replace("_self_attn_", ".self_attn.")
-        k = k.replace("_ffn_net_0_proj", ".ffn.0")
-        k = k.replace("_ffn_net_2", ".ffn.2")
-        k = k.replace("to_out_0", "o")
+        if k.startswith("lycoris_blocks_"):
+            k = k.replace("lycoris_blocks_", "blocks.")
+            k = k.replace("_cross_attn_", ".cross_attn.")
+            k = k.replace("_self_attn_", ".self_attn.")
+            k = k.replace("_ffn_net_0_proj", ".ffn.0")
+            k = k.replace("_ffn_net_2", ".ffn.2")
+            k = k.replace("to_out_0", "o")
         # Diffusers format
         if k.startswith('transformer.'):
             k = k.replace('transformer.', 'diffusion_model.')
@@ -717,6 +718,7 @@ class WanVideoModelLoader:
                     "flash_attn_2",
                     "flash_attn_3",
                     "sageattn",
+                    "sageattn_3",
                     "flex_attention",
                     "radial_sage_attention",
                     ], {"default": "sdpa"}),
