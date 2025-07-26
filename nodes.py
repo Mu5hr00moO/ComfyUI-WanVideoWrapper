@@ -1939,8 +1939,10 @@ class WanVideoSampler:
 
         #region model pred
         def predict_with_cfg(z, cfg_scale, positive_embeds, negative_embeds, timestep, idx, image_cond=None, clip_fea=None, 
+# START OF CHANGES
                              control_latents=None, vace_data=None, unianim_data=None, audio_proj=None, control_camera_latents=None, 
-                             add_cond=None, cache_state=None, context_window=None, multitalk_audio_embeds=None):
+                             add_cond=None, cache_state=None, context_window=None, multitalk_audio_embeds=None, current_seq_len=None):
+# END OF CHANGES
             z = z.to(dtype)
             with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=("fp8" in model["quantization"])):
 
@@ -2074,7 +2076,9 @@ class WanVideoSampler:
 
                  
                 base_params = {
-                    'seq_len': seq_len,
+# START OF CHANGES
+                    'seq_len': current_seq_len if current_seq_len is not None else seq_len,
+# END OF CHANGES
                     'device': device,
                     'freqs': freqs,
                     't': timestep,
@@ -2592,19 +2596,26 @@ class WanVideoSampler:
                                 "end_percent": unianimate_poses["end_percent"]
                             }
                             
+# START OF CHANGES                            
                         partial_add_cond = None
                         if add_cond is not None:
                             partial_add_cond = add_cond[:, :, c].to(device, dtype)
+
+                        # Dynamically calculate seq_len for the current window 'c'
+                        lat_h = noise.shape[2]
+                        lat_w = noise.shape[3]
+                        current_seq_len = math.ceil((lat_h * lat_w) / 4 * len(c))
 
                         noise_pred_context, new_teacache = predict_with_cfg(
                             partial_latent_model_input, 
                             cfg[idx], positive, 
                             text_embeds["negative_prompt_embeds"], 
                             timestep, idx, partial_img_emb, clip_fea, partial_control_latents, partial_vace_context, partial_unianim_data,partial_audio_proj,
-                            partial_control_camera_latents, partial_add_cond, current_teacache, context_window=c)
+                            partial_control_camera_latents, partial_add_cond, current_teacache, context_window=c, current_seq_len=current_seq_len)
 
                         if cache_args is not None:
                             self.window_tracker.cache_states[window_id] = new_teacache
+# END OF CHANGES
 
                         window_mask = create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=is_looped, window_type=context_options["fuse_method"])                    
                         noise_pred[:, c] += noise_pred_context * window_mask
