@@ -10,7 +10,7 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from .wanvideo.modules.model import rope_params
 from .fp8_optimization import convert_linear_with_lora_and_scale, remove_lora_from_module
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
-
+from .gguf.gguf import set_lora_params
 from .multitalk.multitalk import timestep_transform, add_noise
 from .utils import log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter, is_image_black, add_noise_to_reference_video, optimized_scale, find_closest_valid_dim
 from .cache_methods.cache_methods import cache_report
@@ -57,6 +57,8 @@ class WanVideoSetBlockSwap:
         return {
             "required": {
                 "model": ("WANVIDEOMODEL", ),
+               },
+            "optional": {
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                }
         }
@@ -66,8 +68,9 @@ class WanVideoSetBlockSwap:
     FUNCTION = "loadmodel"
     CATEGORY = "WanVideoWrapper"
 
-    def loadmodel(self, model, block_swap_args):
-
+    def loadmodel(self, model, block_swap_args=None):
+        if block_swap_args is None:
+            return (model,)
         patcher = model.clone()
         if 'transformer_options' not in patcher.model_options:
             patcher.model_options['transformer_options'] = {}
@@ -1283,13 +1286,18 @@ class WanVideoSampler:
         model = model.model
         transformer = model.diffusion_model
         dtype = model["dtype"]
+        gguf = model["gguf"]
         control_lora = model["control_lora"]
         transformer_options = patcher.model_options.get("transformer_options", None)
 
         if len(patcher.patches) != 0 and transformer_options.get("linear_with_lora", False) is True:
-            log.info(f"Using {len(patcher.patches)} patches for WanVideo model")
-            convert_linear_with_lora_and_scale(transformer, patches=patcher.patches)
+            log.info(f"Using {len(patcher.patches)} LoRA weight patches for WanVideo model")
+            if not gguf:
+                convert_linear_with_lora_and_scale(transformer, patches=patcher.patches)
+            else:
+                set_lora_params(transformer, patcher.patches)
         else:
+            log.info("Unloading all LoRAs")
             remove_lora_from_module(transformer)
 
         #compile
@@ -2072,6 +2080,7 @@ class WanVideoSampler:
                     'freqs': freqs,
                     't': timestep,
                     'current_step': idx,
+                    'last_step': len(timesteps) - 1 == idx,
                     'control_lora_enabled': control_lora_enabled,
                     'enhance_enabled': enhance_enabled,
                     'camera_embed': camera_embed,
