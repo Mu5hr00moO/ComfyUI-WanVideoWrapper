@@ -57,6 +57,8 @@ class WanVideoSetBlockSwap:
         return {
             "required": {
                 "model": ("WANVIDEOMODEL", ),
+               },
+            "optional": {
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                }
         }
@@ -66,8 +68,9 @@ class WanVideoSetBlockSwap:
     FUNCTION = "loadmodel"
     CATEGORY = "WanVideoWrapper"
 
-    def loadmodel(self, model, block_swap_args):
-
+    def loadmodel(self, model, block_swap_args=None):
+        if block_swap_args is None:
+            return (model,)
         patcher = model.clone()
         if 'transformer_options' not in patcher.model_options:
             patcher.model_options['transformer_options'] = {}
