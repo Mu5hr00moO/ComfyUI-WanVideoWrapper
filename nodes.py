@@ -231,20 +231,34 @@ class WanVideoTextEncode:
         if model_to_offload is not None:
             log.info(f"Moving video model to {offload_device}")
             model_to_offload.model.to(offload_device)
-            mm.soft_empty_cache()
 
         encoder = t5["model"]
         dtype = t5["dtype"]
+        echoshot = False
 
-        # Split positive prompts and process each with weights
-        positive_prompts_raw = [p.strip() for p in positive_prompt.split('|')]
         positive_prompts = []
         all_weights = []
+
+        # Split positive prompts and process each with weights
+        if "|" in positive_prompt:
+            log.info("Multiple positive prompts detected, splitting by '|'")
+            positive_prompts_raw = [p.strip() for p in positive_prompt.split('|')]
+        elif "[1]" in positive_prompt:
+            log.info("Multiple positive prompts detected, splitting by [#] and enabling EchoShot")
+            import re
+            segments = re.split(r'\[\d+\]', positive_prompt)
+            positive_prompts_raw = [segment.strip() for segment in segments if segment.strip()]
+            assert len(positive_prompts_raw) > 1 and len(positive_prompts_raw) < 7, 'Input shot num must between 2~6 !'
+            echoshot = True
+        else:
+            positive_prompts_raw = [positive_prompt.strip()]
+            
         for p in positive_prompts_raw:
             cleaned_prompt, weights = self.parse_prompt_weights(p)
             positive_prompts.append(cleaned_prompt)
             all_weights.append(weights)
 
+        mm.soft_empty_cache()
         encoder.model.to(device)
 
         with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=True):
@@ -273,6 +287,7 @@ class WanVideoTextEncode:
         prompt_embeds_dict = {
             "prompt_embeds": context,
             "negative_prompt_embeds": context_null,
+            "echoshot": echoshot,
         }
 
         # Save each part to its own cache file if needed
@@ -1587,12 +1602,11 @@ class WanVideoSampler:
         audio_scale = 1.0
         if fantasytalking_embeds is not None:
             audio_proj = fantasytalking_embeds["audio_proj"].to(device)
-            audio_context_lens = fantasytalking_embeds["audio_context_lens"]
             audio_scale = fantasytalking_embeds["audio_scale"]
             audio_cfg_scale = fantasytalking_embeds["audio_cfg_scale"]
             if not isinstance(audio_cfg_scale, list):
                 audio_cfg_scale = [audio_cfg_scale] * (steps +1)
-            log.info(f"Audio proj shape: {audio_proj.shape}, audio context lens: {audio_context_lens}")
+            log.info(f"Audio proj shape: {audio_proj.shape}")
         elif multitalk_embeds is not None:
             # Handle single or multiple speaker embeddings
             audio_features_in = multitalk_embeds.get("audio_features", None)
@@ -1739,6 +1753,17 @@ class WanVideoSampler:
         else:
             feta_args = None
             enhance_enabled = False
+
+        # EchoShot https://github.com/D2I-ai/EchoShot
+        echoshot = False
+        shot_len = None
+        if text_embeds is not None:
+            echoshot = text_embeds.get("echoshot", False)
+        if echoshot:
+            shot_num = len(text_embeds["prompt_embeds"])
+            shot_len = [latent_video_length//shot_num] * (shot_num-1)
+            shot_len.append(latent_video_length-sum(shot_len))
+            log.info(f"Number of shots in prompt: {shot_num}, Shot token lengths: {shot_len}")
 
         #region transformer settings
         #rope
@@ -2091,7 +2116,6 @@ class WanVideoSampler:
                     'fun_ref': fun_ref_input if fun_ref_image is not None else None,
                     'fun_camera': control_camera_input if control_camera_latents is not None else None,
                     'audio_proj': audio_proj if fantasytalking_embeds is not None else None,
-                    'audio_context_lens': audio_context_lens if fantasytalking_embeds is not None else None,
                     'audio_scale': audio_scale,
                     "pcd_data": pcd_data_input,
                     "controlnet": controlnet,
@@ -2100,6 +2124,7 @@ class WanVideoSampler:
                     "nag_context": text_embeds.get("nag_prompt_embeds", None),
                     "multitalk_audio": multitalk_audio_input if multitalk_audio_embedding is not None else None,
                     "ref_target_masks": ref_target_masks if multitalk_audio_embedding is not None else None,
+                    "inner_t": [shot_len] if shot_len else None,
                 }
 
                 batch_size = 1
