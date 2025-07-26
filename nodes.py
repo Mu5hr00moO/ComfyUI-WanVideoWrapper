@@ -1110,7 +1110,7 @@ class WanVideoContextOptions:
             },
             "optional": {
                 "prompt_blend_ratio": ("FLOAT", {"default": 1.0, "min": -1.0, "max": 10.0, "step": 0.1, "tooltip": "Controls prompt blending curve. -1.0 disables this feature."}),
-                "fuse_method": (["linear", "pyramid"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
+                "fuse_method": (["linear", "pyramid", "gaussian"], {"default": "linear", "tooltip": "Window weight function: linear=ramps at edges only, pyramid=triangular weights peaking in middle"}),
                 "reference_latent": ("LATENT", {"tooltip": "Image to be used as init for I2V models for windows where first frame is not the actual first frame. Mostly useful with MAGREF model"}),
             }
         }
@@ -1133,7 +1133,7 @@ class WanVideoContextOptions:
             "freenoise":freenoise,
             "verbose":verbose,
             "fuse_method":fuse_method,
-            "edge_padding_frames":edge_padding_frames
+            "edge_padding_frames":edge_padding_frames,
             "reference_latent":reference_latent["samples"][0] if reference_latent is not None else None,
         }
         return (context_options,)
@@ -1422,7 +1422,7 @@ class WanVideoSampler:
         else: #t2v
             target_shape = image_embeds.get("target_shape", None)
             if target_shape is None:
-                raise ValueError("Empty image embeds must be provided for T2V (Text to Video")
+                raise ValueError("Empty image embeds must be provided for T2V models")
             
             has_ref = image_embeds.get("has_ref", False)
             vace_context = image_embeds.get("vace_context", None)
@@ -1755,7 +1755,12 @@ class WanVideoSampler:
             for block in transformer.vace_blocks:
                 block.rope_func = rope_function
 
-        #blockswap init        
+        #blockswap init
+
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+        gc.collect()
+        
         if transformer_options is not None:
             block_swap_args = transformer_options.get("block_swap_args", None)
 
@@ -2892,18 +2897,15 @@ class WanVideoSampler:
                         latent_for_step = latent
                     # --- END: SLICING FOR SCHEDULER STEP ---
                         
-                    temp_x0 = sample_scheduler.step(
+                    latent = sample_scheduler.step(
                         noise_pred[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else noise_pred.unsqueeze(0),
                         timestep,
                         latent_for_step[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else latent_for_step.unsqueeze(0),
-                        **scheduler_step_args)[0]
-                    latent = temp_x0.squeeze(0)
-
-                    x0 = latent.to(device)
+                        **scheduler_step_args)[0].squeeze(0)
                     
                     # This is the original, unchanged line before the block to be replaced
                     if freeinit_args is not None:
-                        current_latent = x0.clone()
+                        current_latent = latent.clone()
 
                     if callback is not None:
                         # Determine which latent to use for the callback preview
@@ -2931,7 +2933,7 @@ class WanVideoSampler:
                         pbar.update(1)
 
         if phantom_latents is not None:
-            x0 = x0[:,:-phantom_latents.shape[1]]
+            latent = latent[:,:-phantom_latents.shape[1]]
                 
         if cache_args is not None:
             cache_report(transformer, cache_args)
@@ -2951,7 +2953,7 @@ class WanVideoSampler:
             pass
 
         return ({
-            "samples": x0.unsqueeze(0).cpu(), 
+            "samples": latent.unsqueeze(0).cpu(), 
             "looped": is_looped, 
             "end_image": end_image if not fun_or_fl2v_model else None, 
             "has_ref": has_ref, 
