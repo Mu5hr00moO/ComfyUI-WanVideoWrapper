@@ -393,9 +393,9 @@ class WanVideoLoraSelect:
 
         if unique_id and PromptServer is not None:
             try:
-                # Build table rows for metadata
-                metadata_rows = ""
                 if metadata:
+                    # Build table rows for metadata
+                    metadata_rows = ""
                     for key, value in metadata.items():
                         # Format value - handle special cases
                         if isinstance(value, dict):
@@ -404,19 +404,17 @@ class WanVideoLoraSelect:
                             formatted_value = "<pre>" + "\n".join([str(item) for item in value]) + "</pre>"
                         else:
                             formatted_value = str(value)
-                        
                         metadata_rows += f"<tr><td><b>{key}</b></td><td>{formatted_value}</td></tr>"
-                
-                PromptServer.instance.send_progress_text(
-                    f"<details>"
-                    f"<summary><b>Metadata</b></summary>"
-                    f"<table border='0' cellpadding='3'>"
-                    f"<tr><td colspan='2'><b>Metadata</b></td></tr>"
-                    f"{metadata_rows if metadata else '<tr><td>No metadata found</td></tr>'}"
-                    f"</table>"
-                    f"</details>", 
-                    unique_id
-                )
+                    PromptServer.instance.send_progress_text(
+                        f"<details>"
+                        f"<summary><b>Metadata</b></summary>"
+                        f"<table border='0' cellpadding='3'>"
+                        f"<tr><td colspan='2'><b>Metadata</b></td></tr>"
+                        f"{metadata_rows}"
+                        f"</table>"
+                        f"</details>", 
+                        unique_id
+                    )
             except Exception as e:
                 print(f"Error displaying metadata: {e}")
                 pass

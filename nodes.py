@@ -1764,7 +1764,6 @@ class WanVideoSampler:
                 block.rope_func = rope_function
 
         #blockswap init
-
         mm.unload_all_models()
         mm.soft_empty_cache()
         gc.collect()
@@ -2259,7 +2258,6 @@ class WanVideoSampler:
             shift_idx = 0
 
         #clear memory before sampling
-        mm.unload_all_models()
         mm.soft_empty_cache()
         gc.collect()
         try:
@@ -2897,7 +2895,7 @@ class WanVideoSampler:
                     latent_video_length = original_latent_video_length
                     
                     latent = latent.to(intermediate_device)
-                    
+            
                     # --- START: SLICING FOR SCHEDULER STEP ---
                     if padding_latent_frames > 0:
                         # Ensure the scheduler step operates on the original, unpadded length
@@ -2914,7 +2912,7 @@ class WanVideoSampler:
                     
                     # This is the original, unchanged line before the block to be replaced
                     if freeinit_args is not None:
-                        current_latent = latent.clone()
+                        current_latent = latent_for_step.clone()
 
                     if callback is not None:
                         # Determine which latent to use for the callback preview
@@ -2942,7 +2940,7 @@ class WanVideoSampler:
                         pbar.update(1)
 
         if phantom_latents is not None:
-            latent = latent[:,:-phantom_latents.shape[1]]
+            latent_for_step = latent_for_step[:,:-phantom_latents.shape[1]]
                 
         if cache_args is not None:
             cache_report(transformer, cache_args)
@@ -2962,7 +2960,7 @@ class WanVideoSampler:
             pass
 
         return ({
-            "samples": latent.unsqueeze(0).cpu(), 
+            "samples": latent_for_step.unsqueeze(0).cpu(), 
             "looped": is_looped, 
             "end_image": end_image if not fun_or_fl2v_model else None, 
             "has_ref": has_ref, 
