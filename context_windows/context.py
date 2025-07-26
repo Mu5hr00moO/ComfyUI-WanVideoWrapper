@@ -240,6 +240,7 @@ def generative_bridge(
     num_steps: Optional[int],
     num_frames: int,
     context_size: Optional[int],
+    context_stride: int, # This parameter is added back to match the call signature
     context_overlap: int,
     **kwargs,
 ) -> Generator[List[int], None, None]:
