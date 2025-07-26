@@ -232,7 +232,61 @@ def meet_in_the_middle(
     # Clean up, remove duplicates, sort, and yield
     unique_windows_tuples = sorted(list(set(tuple(w) for w in windows)))
     for w_tuple in unique_windows_tuples:
-        yield list(w_tuple)       
+        yield list(w_tuple)     
+
+# START OF CHANGES
+def generative_bridge(
+    step: int,
+    num_steps: Optional[int],
+    num_frames: int,
+    context_size: Optional[int],
+    context_overlap: int,
+    **kwargs,
+) -> Generator[List[int], None, None]:
+    """
+    A scheduler that creates two types of windows: 'full' and 'bridge'.
+    - 'Full' windows are of `context_size` and are tiled without overlap.
+    - 'Bridge' windows are of `2 * context_overlap` length and are generated
+      by taking the end of a full window and the start of the next one.
+    """
+    if num_frames <= context_size:
+        yield list(range(num_frames))
+        return
+
+    # 1. Generate the 'Full' windows (tiled without overlap)
+    full_windows = []
+    start_idx = 0
+    while start_idx < num_frames:
+        end_idx = min(start_idx + context_size, num_frames)
+        full_windows.append(list(range(start_idx, end_idx)))
+        start_idx += context_size
+
+    # 2. Generate the 'Bridge' windows between pairs of full windows
+    bridge_windows = []
+    if context_overlap > 0:
+        for i in range(len(full_windows) - 1):
+            prev_window = full_windows[i]
+            next_window = full_windows[i+1]
+
+            # Cannot create a valid bridge if windows are too short
+            if len(prev_window) < context_overlap or len(next_window) < context_overlap:
+                continue
+
+            slice_from_prev = prev_window[-context_overlap:]
+            slice_from_next = next_window[:context_overlap]
+            bridge_windows.append(slice_from_prev + slice_from_next)
+
+    # 3. Combine, sort by start frame, and yield unique windows
+    all_windows = full_windows + bridge_windows
+    all_windows.sort(key=lambda w: w[0])
+
+    yielded_windows = set()
+    for window in all_windows:
+        win_tuple = tuple(window)
+        if win_tuple not in yielded_windows:
+            yield window
+            yielded_windows.add(win_tuple)
+# END OF CHANGES        
 
 def get_context_scheduler(name: str) -> Callable:
     """Factory function to select a context scheduler by name."""
@@ -242,6 +296,7 @@ def get_context_scheduler(name: str) -> Callable:
         "static_standard": static_standard,
         "progressive": progressive,
         "meet_in_the_middle": meet_in_the_middle,
+        "generative_bridge": generative_bridge,
     }
     
     scheduler_func = schedulers.get(name)

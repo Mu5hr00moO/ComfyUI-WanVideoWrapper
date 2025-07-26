@@ -1103,7 +1103,7 @@ class WanVideoContextOptions:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "context_schedule": (["static_standard", "uniform_standard", "uniform_looped", "progressive", "meet_in_the_middle"],),
+            "context_schedule": (["static_standard", "uniform_standard", "uniform_looped", "progressive", "meet_in_the_middle", "generative_bridge"],),
             "context_frames": ("INT", {"default": 81, "min": 2, "max": 1000, "step": 1, "tooltip": "Number of pixel frames in the context, NOTE: the latent space has 4 frames in 1"} ),
             "context_stride": ("INT", {"default": 4, "min": 4, "max": 100, "step": 1, "tooltip": "Context stride as pixel frames, NOTE: the latent space has 4 frames in 1"} ),
             "context_overlap": ("INT", {"default": 16, "min": 4, "max": 100, "step": 1, "tooltip": "Context overlap as pixel frames, NOTE: the latent space has 4 frames in 1"} ),
