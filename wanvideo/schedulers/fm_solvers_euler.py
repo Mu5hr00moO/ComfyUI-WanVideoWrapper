@@ -120,10 +120,11 @@ class EulerScheduler(FlowMatchEulerDiscreteScheduler):
     def _convert_to_beta(
         self, in_sigmas: np.ndarray, num_inference_steps: int, alpha: float = 0.6, beta: float = 0.6
     ) -> np.ndarray:
-        """Convert sigmas to a continuous Beta-shaped schedule (Direct Beta), numerically safe."""
-        # --- numerical safety + vectorized direct mapping ---
-        sigma_min = float(in_sigmas[-1])
-        sigma_max = float(in_sigmas[0])
+        """Convert sigmas to a continuous Beta-shaped schedule (Direct Beta), numerically safe.
+        Based on 'Beta Sampling is All You Need' [arXiv:2407.12173] (Lee et. al, 2024)."""
+        # Use config values if available, otherwise fall back to in_sigmas
+        sigma_min = getattr(self.config, "sigma_min", in_sigmas[-1]) if hasattr(self, "config") else in_sigmas[-1]
+        sigma_max = getattr(self.config, "sigma_max", in_sigmas[0]) if hasattr(self, "config") else in_sigmas[0]
         assert sigma_max >= sigma_min, "expected sigma_max >= sigma_min"
         assert num_inference_steps >= 1, "num_inference_steps must be >= 1"
         assert alpha > 0.0 and beta > 0.0, "alpha and beta must be > 0"
