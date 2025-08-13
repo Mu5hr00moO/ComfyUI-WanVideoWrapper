@@ -130,12 +130,10 @@ class EulerScheduler(FlowMatchEulerDiscreteScheduler):
         assert alpha > 0.0 and beta > 0.0, "alpha and beta must be > 0"
 
         eps = 1e-6  # avoid exact endpoints {0,1} to prevent NaN/Inf in some SciPy builds
-        # Build u strictly within (0,1); flip to start near sigma_max and end near sigma_min
         t = np.linspace(eps, 1.0 - eps, num_inference_steps, endpoint=True)  # length N
         u = 1.0 - t
         p = scipy.stats.beta.ppf(u, alpha, beta)  # p in (0,1)
 
-        # Affine map p in [0,1] -> [sigma_min, sigma_max] (descending)
         sigmas = sigma_min + p * (sigma_max - sigma_min)
         sigmas = sigmas.astype(np.float32)
         return sigmas

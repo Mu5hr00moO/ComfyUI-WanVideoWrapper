@@ -1600,6 +1600,7 @@ class WanVideoSampler:
             sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
         else:
             timesteps = torch.tensor([1000, 750, 500, 250], device=device)
+        log.info(f"scheduler: {scheduler} | shift: {shift}")
         log.info(f"sigmas: {sample_scheduler.sigmas}")
         
         steps = len(timesteps)
