@@ -15,22 +15,23 @@ from .nodes_deprecated import NODE_CLASS_MAPPINGS as DEPRECATED_NODE_CLASS_MAPPI
 
 try:
     from .qwen.qwen import NODE_CLASS_MAPPINGS as QWEN_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as QWEN_NODE_DISPLAY_NAME_MAPPINGS
-except ImportError:
+except Exception as e:
+    print(f"Qwen nodes not available due to error in importing them: {e}")
     QWEN_NODE_CLASS_MAPPINGS = {}
     QWEN_NODE_DISPLAY_NAME_MAPPINGS = {}
-    print("Qwen not available due to missing dependencies, probably transformers")
+   
 
 try:
     from .fantasyportrait.nodes import NODE_CLASS_MAPPINGS as FANTASYPORTRAIT_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as FANTASYPORTRAIT_NODE_DISPLAY_NAME_MAPPINGS
-except ImportError:
-    print("FantasyPortrait not available due to missing dependencies, probably safetensors or torch")
+except Exception as e:
+    print(f"FantasyPortrait nodes not available due to error in importing them: {e}")
     FANTASYPORTRAIT_NODE_CLASS_MAPPINGS = {}
     FANTASYPORTRAIT_NODE_DISPLAY_NAME_MAPPINGS = {}
 
 try:
     from .unianimate.nodes import NODE_CLASS_MAPPINGS as UNIANIMATE_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as UNIANIMATE_NODE_DISPLAY_NAME_MAPPINGS
-except ImportError:
-    print("UniAnimate not available due to missing dependencies")
+except Exception as e:
+    print(f"UniAnimate nodes not available due to error in importing them: {e}")
     UNIANIMATE_NODE_CLASS_MAPPINGS = {}
     UNIANIMATE_NODE_DISPLAY_NAME_MAPPINGS = {}
 
