@@ -1022,6 +1022,7 @@ class VideoVAE_(nn.Module):
     def encode(self, x):
         self.clear_cache()
         ## cache
+        pbar = ProgressBar(x.shape[2])
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
 
@@ -1036,6 +1037,7 @@ class VideoVAE_(nn.Module):
                                     feat_cache=self._enc_feat_map,
                                     feat_idx=self._enc_conv_idx)
                 out = torch.cat([out, out_], 2)
+            pbar.update(1)
         mu = self.conv1(out).chunk(2, dim=1)[0]
 
         mu = (mu - self.mean.to(mu)) * self.inv_std.to(mu)

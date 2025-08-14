@@ -1,0 +1,203 @@
+import os
+import torch
+import numpy as np
+from ..utils import log
+
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
+
+import comfy.model_management as mm
+from comfy.utils import load_torch_file, ProgressBar
+import folder_paths
+
+script_directory = os.path.dirname(os.path.abspath(__file__))
+device = mm.get_torch_device()
+offload_device = mm.unet_offload_device()
+
+alignment_model_path = os.path.join(script_directory, "models", "face_landmark.onnx")
+det_model_path = os.path.join(script_directory, "models", "face_det.onnx")
+
+from .model import PortraitAdapter
+from .pdf import get_drive_expression_pd_fgc, det_landmarks, FanEncoder
+from .camer import CameraDemo
+from .face_align import FaceAlignment
+
+def load_pd_fgc_model(state_dict):
+    face_aligner = CameraDemo(
+        face_alignment_module=FaceAlignment(
+            gpu_id=None,
+            alignment_model_path=alignment_model_path,
+            det_model_path=det_model_path,
+        ),
+        reset=False,
+    )
+
+    pd_fpg_motion = FanEncoder()
+    m, u = pd_fpg_motion.load_state_dict(state_dict, strict=False)
+    pd_fpg_motion = pd_fpg_motion.eval()
+
+    return face_aligner, pd_fpg_motion
+
+
+def get_emo_feature(frame_list, face_aligner, pd_fpg_motion, device):
+    
+
+    comfy_pbar = ProgressBar(3)
+    landmark_list = det_landmarks(face_aligner, frame_list, comfy_pbar)[1]
+    emo_list = get_drive_expression_pd_fgc(pd_fpg_motion, frame_list, landmark_list, device)
+    comfy_pbar.update(1)
+
+    #emo_feat_list = []
+    head_emo_feat_list = []
+    for emo in emo_list:
+        headpose_emb = emo["headpose_emb"]
+        eye_embed = emo["eye_embed"]
+        emo_embed = emo["emo_embed"]
+        mouth_feat = emo["mouth_feat"]
+
+        emo_feat = torch.cat([eye_embed, emo_embed, mouth_feat], dim=1)
+        head_emo_feat = torch.cat([headpose_emb, emo_feat], dim=1)
+
+        #emo_feat_list.append(emo_feat)
+        head_emo_feat_list.append(head_emo_feat)
+
+    #emo_feat_all = torch.cat(emo_feat_list, dim=0).unsqueeze(0)
+    head_emo_feat_all = torch.cat(head_emo_feat_list, dim=0).unsqueeze(0)
+
+    return head_emo_feat_all
+
+class FantasyPortraitFaceDetector:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "portrait_model": ("FANTASYPORTRAITMODEL",),
+                "images": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("PORTRAIT_EMBEDS",)
+    RETURN_NAMES = ("portrait_embeds", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "WanVideoWrapper"
+
+    def loadmodel(self, images, portrait_model):
+        B, H, W, C = images.shape
+        num_frames = ((B - 1) // 4) * 4 + 1
+        images = images.clone()[:num_frames]
+        
+        def tensor_batch_to_numpy_list(images):
+            images = images.detach().cpu()
+            numpy_list = []
+            for img in images:
+                # img shape: (H, W, C)
+                img = img.numpy()
+                img = img[..., :3]
+                img = (img * 255).clip(0, 255)
+                img = img.astype(np.uint8)
+                numpy_list.append(img)
+            return numpy_list
+
+
+        numpy_list = tensor_batch_to_numpy_list(images)
+
+        pd_fpg_sd = {}
+        for k, v in portrait_model["sd"].items():
+            if k.startswith("pd_fpg."):
+                pd_fpg_sd[k.replace("pd_fpg.", "")] = v
+        
+        face_aligner, pd_fpg_motion = load_pd_fgc_model(pd_fpg_sd)
+
+        pd_fpg_motion.to(device)
+        head_emo_feat_all = get_emo_feature(numpy_list, face_aligner, pd_fpg_motion, device=device)
+        pd_fpg_motion.to(offload_device)
+
+        portrait_model = portrait_model["proj_model"]
+
+        portrait_model.to(device)
+        adapter_proj = portrait_model.get_adapter_proj(head_emo_feat_all.to(device, dtype=portrait_model.dtype))
+        portrait_model.to(offload_device)
+
+        pos_idx_range = portrait_model.split_audio_adapter_sequence(adapter_proj.size(1), num_frames=num_frames)
+        proj_split, context_lens = portrait_model.split_tensor_with_padding(adapter_proj, pos_idx_range, expand_length=0)
+
+        return (proj_split,)
+
+class WanVideoAddFantasyPortrait:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "embeds": ("WANVIDIMAGE_EMBEDS",),
+                    "portrait_embeds": ("PORTRAIT_EMBEDS",),
+                    "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01, "tooltip": "Strength of the portrait embedding"}),
+                    "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percentage of the embedding application"}),
+                    "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percentage of the embedding application"}),
+                }
+        }
+
+    RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
+    RETURN_NAMES = ("image_embeds",)
+    FUNCTION = "add"
+    CATEGORY = "WanVideoWrapper"
+
+    def add(self, embeds, portrait_embeds, strength, start_percent=0.0, end_percent=1.0):
+        new_entry = {
+            "adapter_proj": portrait_embeds,
+            "strength": strength,
+            "start_percent": start_percent,
+            "end_percent": end_percent,
+        }
+
+        updated = dict(embeds)
+        updated["portrait_embeds"] = new_entry
+        return (updated,)
+
+class FantasyPortraitModelLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
+
+            "base_precision": (["fp32", "bf16", "fp16"], {"default": "fp16"}),
+            },
+        }
+
+    RETURN_TYPES = ("FANTASYPORTRAITMODEL",)
+    RETURN_NAMES = ("model", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "WanVideoWrapper"
+
+    def loadmodel(self, model, base_precision):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
+        
+        model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
+        sd = load_torch_file(model_path, device=offload_device, safe_load=True)
+        adapter_in_dim = sd["proj_model.norm.weight"].shape[0]
+
+        with init_empty_weights():
+            fantasyportrait_proj_adapter = PortraitAdapter(adapter_in_dim=adapter_in_dim, adapter_proj_dim=adapter_in_dim, dtype=base_dtype)
+
+        for name, param in fantasyportrait_proj_adapter.named_parameters():
+            set_module_tensor_to_device(fantasyportrait_proj_adapter, name, device=offload_device, dtype=base_dtype, value=sd[name])
+
+        fantasyportrait = {
+            "proj_model": fantasyportrait_proj_adapter,
+            "sd": sd,
+        }
+
+        return (fantasyportrait,)
+
+
+NODE_CLASS_MAPPINGS = {
+    "FantasyPortraitModelLoader": FantasyPortraitModelLoader,
+    "FantasyPortraitFaceDetector": FantasyPortraitFaceDetector,
+    "WanVideoAddFantasyPortrait": WanVideoAddFantasyPortrait,
+    }
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "FantasyPortraitModelLoader": "FantasyPortrait Model Loader",
+    "FantasyPortraitFaceDetector": "FantasyPortrait Face Detector",
+    "WanVideoAddFantasyPortrait": "WanVideo Add Fantasy Portrait",
+    }
