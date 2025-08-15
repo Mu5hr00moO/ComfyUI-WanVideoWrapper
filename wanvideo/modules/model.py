@@ -776,7 +776,7 @@ class WanAttentionBlock(nn.Module):
         if x_ip is not None:
             shift_msa_ip, scale_msa_ip, gate_msa_ip, shift_mlp_ip, scale_mlp_ip, gate_mlp_ip = self.get_mod(e_ip.to(x.device))
             input_x_ip = self.modulate(self.norm1(x_ip), shift_msa_ip, scale_msa_ip)
-            self.self_attn.cond_size = input_x_ip.shape[1]
+            self.cond_size = input_x_ip.shape[1]
             input_x = torch.concat([input_x, input_x_ip], dim=1)
             self.kv_cache = None
 
@@ -802,7 +802,7 @@ class WanAttentionBlock(nn.Module):
             k=rope_apply_echoshot(k, grid_sizes, freqs, inner_t).to(k)
         elif x_ip is not None and self.kv_cache is None:
             # First pass - separate main and IP components
-            x_main, x_ip_input = input_x[:, : -self.self_attn.cond_size], input_x[:, -self.self_attn.cond_size :]
+            x_main, x_ip_input = input_x[:, : -self.cond_size], input_x[:, -self.cond_size :]
             # Compute QKV for main content
             q, k, v = self.self_attn.qkv_fn(x_main)
             if self.rope_func == "comfy":
@@ -885,8 +885,8 @@ class WanAttentionBlock(nn.Module):
 
         if x_ip is not None:
             y, y_ip = (
-                y[:, : -self.self_attn.cond_size],
-                y[:, -self.self_attn.cond_size :],
+                y[:, : -self.cond_size],
+                y[:, -self.cond_size :],
             )
 
         x = x.addcmul(y, gate_msa)
@@ -1631,6 +1631,7 @@ class WanModel(torch.nn.Module):
 
         # StandIn LoRA input
         x_ip = None
+        freq_offset = 0
         if standin_input is not None:
             ip_image = standin_input["ip_image_latent"]
 
@@ -1640,6 +1641,7 @@ class WanModel(torch.nn.Module):
             ip_image_patch = self.original_patch_embedding(ip_image.float()).to(x.dtype)
             f_ip, h_ip, w_ip = ip_image_patch.shape[2:]
             x_ip = ip_image_patch.flatten(2).transpose(1, 2)  # [B, N, D]
+            freq_offset = standin_input["freq_offset"]
 
         if freqs is None: #comfy rope
             current_shape = (F, H, W)
@@ -1654,9 +1656,9 @@ class WanModel(torch.nn.Module):
                 freqs = self.cached_freqs
             else:
                 img_ids = torch.zeros((f_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
-                img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, f_len - 1, steps=f_len, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)
-                img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
-                img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
+                img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(freq_offset, f_len + freq_offset - 1, steps=f_len, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)
+                img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(freq_offset, h_len + freq_offset - 1, steps=h_len, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
+                img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(freq_offset, w_len + freq_offset - 1, steps=w_len, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
 
                 if attn_cond is not None:   
                     cond_f_len = ((F_cond + (self.patch_size[0] // 2)) // self.patch_size[0])
@@ -1690,15 +1692,16 @@ class WanModel(torch.nn.Module):
                 self.cached_cond = has_cond
                 self.cached_rope_k = self.rope_embedder.k
 
-        # StandIn RoPE frequencies
+        # Stand-In RoPE frequencies
         if x_ip is not None:
             # Generate RoPE frequencies for x_ip
             ip_img_ids = torch.zeros((f_ip, h_ip, w_ip, 3), device=x.device, dtype=x.dtype)
             ip_img_ids[:, :, :, 0] = ip_img_ids[:, :, :, 0] + torch.linspace(0, f_ip - 1, steps=f_ip, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)
-            ip_img_ids[:, :, :, 1] = ip_img_ids[:, :, :, 1] + torch.linspace(h_len, h_len + h_ip - 1, steps=h_ip, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
-            ip_img_ids[:, :, :, 2] = ip_img_ids[:, :, :, 2] + torch.linspace(w_len, w_len + w_ip - 1, steps=w_ip, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
+            ip_img_ids[:, :, :, 1] = ip_img_ids[:, :, :, 1] + torch.linspace(h_len + freq_offset, h_len + freq_offset + h_ip - 1, steps=h_ip, device=x.device, dtype=x.dtype).reshape(1, -1, 1)
+            ip_img_ids[:, :, :, 2] = ip_img_ids[:, :, :, 2] + torch.linspace(w_len + freq_offset, w_len + freq_offset + w_ip - 1, steps=w_ip, device=x.device, dtype=x.dtype).reshape(1, 1, -1)
             ip_img_ids = repeat(ip_img_ids, "t h w c -> b (t h w) c", b=1)
             freqs_ip = self.rope_embedder(ip_img_ids).movedim(1, 2)
+            print("freqs_ip shape:", freqs_ip.shape)
 
         # EchoShot cross attn freqs
         inner_c = None
