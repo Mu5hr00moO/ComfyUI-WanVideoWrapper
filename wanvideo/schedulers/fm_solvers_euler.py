@@ -4,6 +4,7 @@ import torch
 # pyright: ignore
 from diffusers import FlowMatchEulerDiscreteScheduler  # pyright: ignore
 from torch import Tensor
+from diffusers.utils import is_scipy_available
 import scipy.stats  # Added import for scipy.stats.beta
 
 def unsqueeze_to_ndim(in_tensor: Tensor, tgt_n_dim: int):
@@ -30,6 +31,8 @@ class EulerScheduler(FlowMatchEulerDiscreteScheduler):
         beta: float = 0.6,
         **kwargs
     ) -> None:
+        if use_beta_sigmas and not is_scipy_available():
+            raise ImportError("Make sure to install scipy if you want to use beta sigmas.")
         super().__init__(num_train_timesteps=num_train_timesteps, shift=shift, **kwargs)
         self.init_noise_sigma = 1.0
         self.num_train_timesteps = num_train_timesteps
