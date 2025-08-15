@@ -750,7 +750,7 @@ class WanVideoModelLoader:
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, vram_management_args=None, vace_model=None, 
                   fantasytalking_model=None, multitalk_model=None, fantasyportrait_model=None):
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
-        
+
         lora_low_mem_load = merge_loras = False
         if lora is not None:
             for l in lora:
@@ -817,6 +817,13 @@ class WanVideoModelLoader:
                         if "scaled_fp8" in sd:
                             quantization = "fp8_e5m2_scaled"
                         break
+        
+        if torch.cuda.is_available():
+            #only warning for now
+            major, minor = torch.cuda.get_device_capability(device)
+            log.info(f"CUDA Compute Capability: {major}.{minor}")
+            if compile_args is not None and "e4" in quantization and (major, minor) < (8, 9):
+                log.warning("Torch.compile with fp8_e4m3fn weights on CUDA compute capability < 8.9 is not supported. Please use fp8_e5m2, GGUF or higher precision instead.")
 
         if "scaled_fp8" in sd and "scaled" not in quantization:
             raise ValueError("The model is a scaled fp8 model, please set quantization to '_scaled'")
@@ -895,7 +902,7 @@ class WanVideoModelLoader:
                 vace_layers = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
             vace_in_dim = 96
 
-        log.info(f"Model type: {model_type}, num_heads: {num_heads}, num_layers: {num_layers}")
+        log.info(f"Model cross attention type: {model_type}, num_heads: {num_heads}, num_layers: {num_layers}")
 
         teacache_coefficients_map = {
             "1_3B": {

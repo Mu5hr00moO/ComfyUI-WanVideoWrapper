@@ -18,9 +18,9 @@ alignment_model_path = os.path.join(script_directory, "models", "face_landmark.o
 det_model_path = os.path.join(script_directory, "models", "face_det.onnx")
 
 from .model import PortraitAdapter
-from .pdf import get_drive_expression_pd_fgc, det_landmarks, FanEncoder
-from .camer import CameraDemo
-from .face_align import FaceAlignment
+from .pd_fgc.pdf import get_drive_expression_pd_fgc, det_landmarks, FanEncoder
+from .pd_fgc.camer import CameraDemo
+from .pd_fgc.face_align import FaceAlignment
 
 def load_pd_fgc_model(state_dict):
     face_aligner = CameraDemo(
@@ -43,7 +43,7 @@ def get_emo_feature(frame_list, face_aligner, pd_fpg_motion, device):
     
 
     comfy_pbar = ProgressBar(3)
-    landmark_list = det_landmarks(face_aligner, frame_list, comfy_pbar)[1]
+    _, landmark_list, rect_list = det_landmarks(face_aligner, frame_list, comfy_pbar) 
     emo_list = get_drive_expression_pd_fgc(pd_fpg_motion, frame_list, landmark_list, device)
     comfy_pbar.update(1)
 
@@ -64,7 +64,7 @@ def get_emo_feature(frame_list, face_aligner, pd_fpg_motion, device):
     #emo_feat_all = torch.cat(emo_feat_list, dim=0).unsqueeze(0)
     head_emo_feat_all = torch.cat(head_emo_feat_list, dim=0).unsqueeze(0)
 
-    return head_emo_feat_all
+    return head_emo_feat_all, rect_list, landmark_list
 
 class FantasyPortraitFaceDetector:
     @classmethod
@@ -74,14 +74,19 @@ class FantasyPortraitFaceDetector:
                 "portrait_model": ("FANTASYPORTRAITMODEL",),
                 "images": ("IMAGE",),
             },
+            "optional": {
+                "adapter_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Scale for the adapter projection"}),
+                "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Scale for the mouth projection"}),
+                "emo_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Scale for the emotion projection"}),
+            }
         }
 
-    RETURN_TYPES = ("PORTRAIT_EMBEDS",)
-    RETURN_NAMES = ("portrait_embeds", )
-    FUNCTION = "loadmodel"
+    RETURN_TYPES = ("PORTRAIT_EMBEDS", "BBOX", "LANDMARKS")
+    RETURN_NAMES = ("portrait_embeds", "bbox", "landmarks")
+    FUNCTION = "detect"
     CATEGORY = "WanVideoWrapper"
 
-    def loadmodel(self, images, portrait_model):
+    def detect(self, images, portrait_model, adapter_scale=1.0, mouth_scale=1.0, emo_scale=1.0):
         B, H, W, C = images.shape
         num_frames = ((B - 1) // 4) * 4 + 1
         images = images.clone()[:num_frames]
@@ -109,19 +114,65 @@ class FantasyPortraitFaceDetector:
         face_aligner, pd_fpg_motion = load_pd_fgc_model(pd_fpg_sd)
 
         pd_fpg_motion.to(device)
-        head_emo_feat_all = get_emo_feature(numpy_list, face_aligner, pd_fpg_motion, device=device)
+        head_emo_feat_all, rect_list, landmark_list = get_emo_feature(numpy_list, face_aligner, pd_fpg_motion, device=device)
+        log.info(f"FantasyPortraitFaceDetector: input frames: {num_frames}")
+        log.info(f"FantasyPortraitFaceDetector: features extracted for {head_emo_feat_all.shape[1]} frames")
         pd_fpg_motion.to(offload_device)
 
         portrait_model = portrait_model["proj_model"]
 
         portrait_model.to(device)
-        adapter_proj = portrait_model.get_adapter_proj(head_emo_feat_all.to(device, dtype=portrait_model.dtype))
+        adapter_proj = portrait_model.get_adapter_proj(head_emo_feat_all.to(device, dtype=portrait_model.dtype), adapter_scale=adapter_scale, mouth_scale=mouth_scale, emo_scale=emo_scale)
         portrait_model.to(offload_device)
 
         pos_idx_range = portrait_model.split_audio_adapter_sequence(adapter_proj.size(1), num_frames=num_frames)
         proj_split, context_lens = portrait_model.split_tensor_with_padding(adapter_proj, pos_idx_range, expand_length=0)
 
-        return (proj_split,)
+        return (proj_split, rect_list, landmark_list)
+    
+class LandmarksToImage:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "landmarks": ("LANDMARKS", {"default": []}),
+            "width": ("INT", {"default": 512, "min": 1, "max": 2048, "step": 1, "tooltip": "Width of the output image"}),
+            "height": ("INT", {"default": 512, "min": 1, "max": 2048, "step": 1, "tooltip": "Height of the output image"}),
+           
+            },
+            "optional": {
+                "image": ("IMAGE", ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("keypoints_image",)
+    FUNCTION = "drawkeypoints"
+    CATEGORY = "LivePortrait"
+
+    def drawkeypoints(self, landmarks, width=512, height=512, image=None):
+        import cv2
+        if image is not None:
+            image = image.detach().cpu().numpy() * 255
+            
+        keypoints_img_list = []
+        pbar = ProgressBar(len(landmarks))
+        for i, lmk in enumerate(landmarks):
+            if len(lmk) > 0:
+                if image is None:
+                    keypoints_image = np.zeros((height, width, 3), dtype=np.uint8) * 255
+                else:
+                    keypoints_image = image[i].copy()
+                for (x, y) in lmk:
+                    cv2.circle(keypoints_image, (int(x), int(y)), radius=2, thickness=-1, color=(255,255,255))
+            else:
+                keypoints_image = np.zeros((height, width, 3), dtype=np.uint8) * 255
+            keypoints_img_list.append(keypoints_image)
+            pbar.update(1)
+
+        keypoints_img_tensor = (
+            torch.stack([torch.from_numpy(np_array) for np_array in keypoints_img_list]) / 255).float()
+
+        return (keypoints_img_tensor,)
 
 class WanVideoAddFantasyPortrait:
     @classmethod
@@ -195,9 +246,11 @@ NODE_CLASS_MAPPINGS = {
     "FantasyPortraitModelLoader": FantasyPortraitModelLoader,
     "FantasyPortraitFaceDetector": FantasyPortraitFaceDetector,
     "WanVideoAddFantasyPortrait": WanVideoAddFantasyPortrait,
+    "LandmarksToImage": LandmarksToImage,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FantasyPortraitModelLoader": "FantasyPortrait Model Loader",
     "FantasyPortraitFaceDetector": "FantasyPortrait Face Detector",
     "WanVideoAddFantasyPortrait": "WanVideo Add Fantasy Portrait",
+    "LandmarksToImage": "Landmarks to Image",
     }

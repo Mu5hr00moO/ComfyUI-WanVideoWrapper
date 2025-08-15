@@ -119,7 +119,7 @@ class RotaryPositionalEmbedding1D(nn.Module):
         self.base = 10000
 
 
-    @lru_cache(maxsize=32)
+    #@lru_cache(maxsize=32)
     def precompute_freqs_cis_1d(self, pos_indices):
 
         freqs = 1.0 / (self.base ** (torch.arange(0, self.head_dim, 2)[: (self.head_dim // 2)].float() / self.head_dim))

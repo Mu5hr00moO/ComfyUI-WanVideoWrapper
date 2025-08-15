@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+from ...utils import log
 
 
 def np_bgr_to_tensor(img_np, dtype):
@@ -165,6 +166,8 @@ def det_landmarks(face_aligner, frame_list, comfy_pbar):
                 )[-1]
                 rect_list.append(face["face_rect"])
                 new_frame_list.append(frame)
+            else:
+                log.warning(f"No face detected in the frame {frame}, skipping.")
             pbar.set_description("DET stage1")
             pbar.update()
     comfy_pbar.update(1)
@@ -185,6 +188,8 @@ def det_landmarks(face_aligner, frame_list, comfy_pbar):
                 landmarks = face["pre_kpt_222"]
                 save_frame_list.append(frame)
                 save_landmark_list.append(landmarks)
+            else:
+                log.warning(f"No face detected in the frame {frame}, skipping.")
             pbar.set_description("DET stage2")
             pbar.update()
 

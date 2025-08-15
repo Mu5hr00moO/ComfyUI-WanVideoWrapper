@@ -180,7 +180,7 @@ class PortraitAdapter(nn.Module):
         )
         return proj_model
 
-    def get_adapter_proj(self, adapter_fea=None):
+    def get_adapter_proj(self, adapter_fea=None, adapter_scale=1.0, mouth_scale=1.0, emo_scale=1.0):
         split_sizes = [6, 6, 30, 512]
         headpose, eye, emo, mouth = torch.split(
             adapter_fea, split_sizes, dim=-1
@@ -189,13 +189,13 @@ class PortraitAdapter(nn.Module):
         mouth = mouth.view(B * frames, 1, 512)
         emo = emo.view(B * frames, 1, 30)
 
-        mouth_fea = self.mouth_proj_model(mouth)
-        emo_fea = self.emo_proj_model(emo)
+        mouth_fea = self.mouth_proj_model(mouth) * mouth_scale
+        emo_fea = self.emo_proj_model(emo) * emo_scale
 
         mouth_fea = mouth_fea.view(B, frames, 16, 2048)
         emo_fea = emo_fea.view(B, frames, 4, 2048)
 
-        adapter_fea = self.proj_model(adapter_fea)
+        adapter_fea = self.proj_model(adapter_fea) * adapter_scale
 
         adapter_fea = adapter_fea.view(B, frames, 4, 2048)
 

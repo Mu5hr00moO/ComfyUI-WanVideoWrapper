@@ -757,6 +757,7 @@ class WanVideoAddStandInLatent:
         return {"required": {
                     "embeds": ("WANVIDIMAGE_EMBEDS",),
                     "ip_image_latent": ("LATENT", {"tooltip": "Reference image to encode"}),
+                    "freq_offset": ("INT", {"default": 1, "min": 0, "max": 100, "step": 1, "tooltip": "EXPERIMENTAL: RoPE frequency offset between the reference and rest of the sequence"}),
                     #"start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent to apply the ref "}),
                     #"end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent to apply the ref "}),
                 }
@@ -767,10 +768,11 @@ class WanVideoAddStandInLatent:
     FUNCTION = "add"
     CATEGORY = "WanVideoWrapper"
 
-    def add(self, embeds, ip_image_latent):
+    def add(self, embeds, ip_image_latent, freq_offset):
         # Prepare the new extra latent entry
         new_entry = {
             "ip_image_latent": ip_image_latent["samples"],
+            "freq_offset": freq_offset,
             #"ip_start_percent": start_percent,
             #"ip_end_percent": end_percent,
         }    
@@ -1626,12 +1628,13 @@ class WanVideoSampler:
         seed_g.manual_seed(seed)
 
         #region Scheduler
+        sample_scheduler = None
         if scheduler != "multitalk":
             sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+            log.info(f"scheduler: {scheduler} | shift: {shift}")
+            log.info(f"sigmas: {sample_scheduler.sigmas}")
         else:
             timesteps = torch.tensor([1000, 750, 500, 250], device=device)
-        log.info(f"scheduler: {scheduler} | shift: {shift}")
-        log.info(f"sigmas: {sample_scheduler.sigmas}")
         
         steps = len(timesteps)
 
@@ -1664,14 +1667,15 @@ class WanVideoSampler:
 
         log.info(f"timesteps: {timesteps}")
         
-        if hasattr(sample_scheduler, 'timesteps'):
-            sample_scheduler.timesteps = timesteps
+        if sample_scheduler is not None:
+            if hasattr(sample_scheduler, 'timesteps'):
+                sample_scheduler.timesteps = timesteps
 
-        scheduler_step_args = {"generator": seed_g}
-        step_sig = inspect.signature(sample_scheduler.step)
-        for arg in list(scheduler_step_args.keys()):
-            if arg not in step_sig.parameters:
-                scheduler_step_args.pop(arg)
+            scheduler_step_args = {"generator": seed_g}
+            step_sig = inspect.signature(sample_scheduler.step)
+            for arg in list(scheduler_step_args.keys()):
+                if arg not in step_sig.parameters:
+                    scheduler_step_args.pop(arg)
        
         control_latents = control_camera_latents = clip_fea = clip_fea_neg = end_image = recammaster = camera_embed = unianim_data = None
         vace_data = vace_context = vace_scale = None
@@ -1736,15 +1740,16 @@ class WanVideoSampler:
 
             control_embeds = image_embeds.get("control_embeds", None)
             if control_embeds is not None:
-                print("control_embeds:", control_embeds)
                 if transformer.in_dim not in [52, 48, 36, 32]:
                     raise ValueError("Control signal only works with Fun-Control model")
 
                 control_latents = control_embeds.get("control_images", None)
                 control_start_percent = control_embeds.get("start_percent", 0.0)
                 control_end_percent = control_embeds.get("end_percent", 1.0)
-                if transformer.control_adapter is not None:
-                    control_camera_latents = control_embeds.get("control_camera_latents", None)
+                control_camera_latents = control_embeds.get("control_camera_latents", None)
+                if control_camera_latents is not None:
+                    if transformer.control_adapter is None:
+                        raise ValueError("Control camera latents are only supported with Fun-Control-Camera model")
                     control_camera_start_percent = control_embeds.get("control_camera_start_percent", 0.0)
                     control_camera_end_percent = control_embeds.get("control_camera_end_percent", 1.0)
                 
@@ -1817,8 +1822,11 @@ class WanVideoSampler:
                 control_latents = control_embeds.get("control_images", None)
                 if control_latents is not None:
                     control_latents = control_latents.to(device)
-                if transformer.control_adapter is not None:
-                    control_camera_latents = control_embeds.get("control_camera_latents", None)
+
+                control_camera_latents = control_embeds.get("control_camera_latents", None)
+                if control_camera_latents is not None:
+                    if transformer.control_adapter is None:
+                        raise ValueError("Control camera latents are only supported with Fun-Control-Camera model")
                     control_camera_start_percent = control_embeds.get("control_camera_start_percent", 0.0)
                     control_camera_end_percent = control_embeds.get("control_camera_end_percent", 1.0)
 
@@ -1952,7 +1960,7 @@ class WanVideoSampler:
         fantasy_portrait_input = None
         fantasy_portrait_embeds = image_embeds.get("portrait_embeds", None)
         if fantasy_portrait_embeds is not None:
-            print("Using FantasyPortrait embeddings")
+            log.info("Using FantasyPortrait embeddings")
             fantasy_portrait_input = {
                 "adapter_proj": fantasy_portrait_embeds.get("adapter_proj", None),
                 "strength": fantasy_portrait_embeds.get("strength", 1.0),
@@ -2582,10 +2590,6 @@ class WanVideoSampler:
                 
 
                 return noise_pred, [cache_state_cond, cache_state_uncond]
-            
-        log.info(f"Seq len: {seq_len}")
-           
-        
 
         if args.preview_method in [LatentPreviewMethod.Auto, LatentPreviewMethod.Latent2RGB]: #default for latent2rgb
             from latent_preview import prepare_callback
@@ -2593,6 +2597,7 @@ class WanVideoSampler:
             from .latent_preview import prepare_callback #custom for tiny VAE previews
         callback = prepare_callback(patcher, len(timesteps))
 
+        log.info(f"Input sequence length: {seq_len}")
         log.info(f"Sampling {(latent_video_length-1) * 4 + 1} frames at {latent.shape[3]*vae_upscale_factor}x{latent.shape[2]*vae_upscale_factor} with {steps} steps")
 
         intermediate_device = device
