@@ -4,11 +4,8 @@ import time
 import cv2
 import numpy as np
 
-try:
-    import onnx
-    import onnxruntime
-except ImportError:
-    print("ONNX and ONNX Runtime are required for FantasyPortrait. Please install them using 'pip install onnx onnxruntime-gpu'")
+import onnx
+import onnxruntime
 
 def create_onnx_session(onnx_path, gpu_id=None) -> onnxruntime.InferenceSession:
     start = time.perf_counter()
