@@ -7,27 +7,26 @@ import numpy as np
 import onnx
 import onnxruntime
 
-def create_onnx_session(onnx_path, gpu_id=None) -> onnxruntime.InferenceSession:
+def create_onnx_session(onnx_path, providers) -> onnxruntime.InferenceSession:
     start = time.perf_counter()
     onnx_model = onnx.load(onnx_path)
     onnx.checker.check_model(onnx_model)
-    providers = (
-        [
-            (
-                "CUDAExecutionProvider",
-                {
-                    "device_id": int(gpu_id),
-                    "arena_extend_strategy": "kNextPowerOfTwo",
-                    "cudnn_conv_algo_search": "EXHAUSTIVE",
-                    "do_copy_in_default_stream": True,
-                },
-            ),
-            "CPUExecutionProvider",
-        ]
-        if (gpu_id is not None and gpu_id >= 0)
-        else ["CPUExecutionProvider"]
-    )
-
+    # providers = (
+    #     [
+    #         (
+    #             "CUDAExecutionProvider",
+    #             {
+    #                 "device_id": int(gpu_id),
+    #                 "arena_extend_strategy": "kNextPowerOfTwo",
+    #                 "cudnn_conv_algo_search": "EXHAUSTIVE",
+    #                 "do_copy_in_default_stream": True,
+    #             },
+    #         ),
+    #         #"CPUExecutionProvider",
+    #     ]
+    #     #if (gpu_id is not None and gpu_id >= 0)
+    #     #else ["CPUExecutionProvider"]
+    # )
     sess = onnxruntime.InferenceSession(onnx_path, providers=providers)
     print(
         "create onnx session cost: {:.3f}s. {}".format(

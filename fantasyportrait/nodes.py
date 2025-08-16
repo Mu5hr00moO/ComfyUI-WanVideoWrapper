@@ -22,10 +22,10 @@ from .pd_fgc.pdf import get_drive_expression_pd_fgc, det_landmarks, FanEncoder
 from .pd_fgc.camer import CameraDemo
 from .pd_fgc.face_align import FaceAlignment
 
-def load_pd_fgc_model(state_dict):
+def load_pd_fgc_model(state_dict, providers):
     face_aligner = CameraDemo(
         face_alignment_module=FaceAlignment(
-            gpu_id=None,
+            providers=providers,
             alignment_model_path=alignment_model_path,
             det_model_path=det_model_path,
         ),
@@ -78,6 +78,7 @@ class FantasyPortraitFaceDetector:
                 "adapter_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Scale for the adapter projection"}),
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Scale for the mouth projection"}),
                 "emo_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Scale for the emotion projection"}),
+                "device": (["cuda", "cpu"], {"default": "cuda", "tooltip": "Device to run the model on"}),
             }
         }
 
@@ -86,7 +87,7 @@ class FantasyPortraitFaceDetector:
     FUNCTION = "detect"
     CATEGORY = "WanVideoWrapper"
 
-    def detect(self, images, portrait_model, adapter_scale=1.0, mouth_scale=1.0, emo_scale=1.0):
+    def detect(self, images, portrait_model, adapter_scale=1.0, mouth_scale=1.0, emo_scale=1.0, device="cuda"):
         B, H, W, C = images.shape
         num_frames = ((B - 1) // 4) * 4 + 1
         images = images.clone()[:num_frames]
@@ -110,8 +111,13 @@ class FantasyPortraitFaceDetector:
         for k, v in portrait_model["sd"].items():
             if k.startswith("pd_fpg."):
                 pd_fpg_sd[k.replace("pd_fpg.", "")] = v
-        
-        face_aligner, pd_fpg_motion = load_pd_fgc_model(pd_fpg_sd)
+
+        if device == "cuda":
+            providers = ["CUDAExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+
+        face_aligner, pd_fpg_motion = load_pd_fgc_model(pd_fpg_sd, providers)
 
         pd_fpg_motion.to(device)
         head_emo_feat_all, rect_list, landmark_list = get_emo_feature(numpy_list, face_aligner, pd_fpg_motion, device=device)
