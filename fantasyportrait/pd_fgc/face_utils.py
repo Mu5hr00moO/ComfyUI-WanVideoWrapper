@@ -28,11 +28,11 @@ def create_onnx_session(onnx_path, providers) -> onnxruntime.InferenceSession:
     #     #else ["CPUExecutionProvider"]
     # )
     sess = onnxruntime.InferenceSession(onnx_path, providers=providers)
-    print(
-        "create onnx session cost: {:.3f}s. {}".format(
-            time.perf_counter() - start, onnx_path
-        )
-    )
+    # print(
+    #     "create onnx session cost: {:.3f}s. {}".format(
+    #         time.perf_counter() - start, onnx_path
+    #     )
+    # )
     return sess
 
 
