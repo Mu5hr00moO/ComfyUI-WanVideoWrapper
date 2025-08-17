@@ -31,7 +31,14 @@ from ...echoshot.echoshot import rope_apply_z, rope_apply_c, rope_apply_echoshot
 __all__ = ['WanModel']
 
 from comfy import model_management as mm
-from comfy.ldm.flux.math import apply_rope as apply_rope_comfy
+
+#from comfy.ldm.flux.math import apply_rope as apply_rope_comfy
+def apply_rope_comfy(xq, xk, freqs_cis):    
+    xq_ = xq.to(dtype=freqs_cis.dtype).reshape(*xq.shape[:-1], -1, 1, 2)
+    xk_ = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 1, 2)
+    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
+    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
+    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
 def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
     seq_dim = 1
@@ -159,7 +166,7 @@ def rope_params(max_seq_len, dim, theta=10000, L_test=25, k=0):
 
 @torch.autocast(device_type=mm.get_autocast_device(mm.get_torch_device()), enabled=False)
 @torch.compiler.disable()
-def rope_apply(x, grid_sizes, freqs):
+def rope_apply(x, grid_sizes, freqs, reverse_time=False):
     n, c = x.size(2), x.size(3) // 2
 
     # split freqs
@@ -173,12 +180,24 @@ def rope_apply(x, grid_sizes, freqs):
         # precompute multipliers
         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
             seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
+        if reverse_time:
+            time_freqs = freqs[0][:f].view(f, 1, 1, -1)
+            time_freqs = torch.flip(time_freqs, dims=[0])
+            time_freqs = time_freqs.expand(f, h, w, -1)
+            
+            spatial_freqs = torch.cat([
+                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+            ], dim=-1)
+            
+            freqs_i = torch.cat([time_freqs, spatial_freqs], dim=-1).reshape(seq_len, 1, -1)
+        else:
+            freqs_i = torch.cat([
+                freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+            ],
+                                dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
@@ -760,6 +779,7 @@ class WanAttentionBlock(nn.Module):
         freqs_ip=None,
         adapter_proj=None,
         ip_scale=1.0,
+        reverse_time=False
     ):
         r"""
         Args:
@@ -822,8 +842,8 @@ class WanAttentionBlock(nn.Module):
             elif self.rope_func == "comfy_chunked":
                 q, k = apply_rope_comfy_chunked(q, k, freqs)
             else:
-                q=rope_apply(q, grid_sizes, freqs)
-                k=rope_apply(k, grid_sizes, freqs)
+                q=rope_apply(q, grid_sizes, freqs, reverse_time=reverse_time)
+                k=rope_apply(k, grid_sizes, freqs, reverse_time=reverse_time)
 
         # FETA
         if enhance_enabled:
@@ -1509,7 +1529,8 @@ class WanModel(torch.nn.Module):
         ref_target_masks=None,
         inner_t=None,
         standin_input=None,
-        fantasy_portrait_input=None
+        fantasy_portrait_input=None,
+        reverse_time=False
     ):
         r"""
         Forward pass through the diffusion model
@@ -1652,7 +1673,8 @@ class WanModel(torch.nn.Module):
             if (self.cached_freqs is not None and 
                 self.cached_shape == current_shape and 
                 self.cached_cond == has_cond and
-                self.cached_rope_k == self.rope_embedder.k):
+                self.cached_rope_k == self.rope_embedder.k
+                ):
                 freqs = self.cached_freqs
             else:
                 img_ids = torch.zeros((f_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
@@ -1965,7 +1987,8 @@ class WanModel(torch.nn.Module):
                 freqs_ip=freqs_ip if x_ip is not None else None,
                 e_ip=e0_ip if x_ip is not None else None,
                 adapter_proj=adapter_proj,
-                ip_scale=ip_scale
+                ip_scale=ip_scale,
+                reverse_time=reverse_time
             )
             
             if vace_data is not None:

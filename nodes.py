@@ -1476,6 +1476,7 @@ class WanVideoExperimentalArgs:
                 "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
                 "use_tcfg": ("BOOLEAN", {"default": False, "tooltip": "https://arxiv.org/abs/2503.18137 TCFG: Tangential Damping Classifier-free Guidance. CFG artifacts reduction."}),
                 "raag_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Alpha value for RAAG, 1.0 is default, 0.0 is disabled."}),
+                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"})
             },
         }
 
@@ -1648,6 +1649,8 @@ class WanVideoSampler:
             add_noise_to_samples = True #for now to not break old workflows
 
         first_sampler = (end_step != -1 or end_step >= steps)
+
+        noise_pred_flipped = None
 
         if isinstance(cfg, list):
             if steps != len(cfg):
@@ -2126,38 +2129,16 @@ class WanVideoSampler:
             rope_function = "default" #echoshot does not support comfy rope function
             log.info(f"Number of shots in prompt: {shot_num}, Shot token lengths: {shot_len}")
 
-        #region transformer settings
-        #rope
-        freqs = None
-        transformer.rope_embedder.k = None
-        transformer.rope_embedder.num_frames = None
-        if "comfy" in rope_function:
-            transformer.rope_embedder.k = riflex_freq_index
-            transformer.rope_embedder.num_frames = latent_video_length
-        else:
-            d = transformer.dim // transformer.num_heads
-            freqs = torch.cat([
-                rope_params(1024, d - 4 * (d // 6), L_test=latent_video_length, k=riflex_freq_index),
-                rope_params(1024, 2 * (d // 6)),
-                rope_params(1024, 2 * (d // 6))
-            ],
-            dim=1)
-        transformer.rope_func = rope_function
-        for block in transformer.blocks:
-            block.rope_func = rope_function
-        if transformer.vace_layers is not None:
-            for block in transformer.vace_blocks:
-                block.rope_func = rope_function
-
-        #blockswap init
         
         mm.unload_all_models()
         mm.soft_empty_cache()
         gc.collect()
-        
+
+        #region transformer settings
         if transformer_options is not None:
             block_swap_args = transformer_options.get("block_swap_args", None)
 
+        #blockswap init
         if block_swap_args is not None:
             transformer.use_non_blocking = block_swap_args.get("use_non_blocking", False)
             for name, param in transformer.named_parameters():
@@ -2257,7 +2238,7 @@ class WanVideoSampler:
                 timesteps[-drift_steps:] = drift_timesteps[-drift_steps:]
 
         # Experimental args
-        use_cfg_zero_star = use_tangential = use_fresca = False
+        use_cfg_zero_star = use_tangential = use_fresca = bidirectional_sampling =False
         raag_alpha = 0.0
         if experimental_args is not None:
             video_attention_split_steps = experimental_args.get("video_attention_split_steps", [])
@@ -2278,10 +2259,38 @@ class WanVideoSampler:
                 fresca_scale_high = experimental_args.get("fresca_scale_high", 1.25)
                 fresca_freq_cutoff = experimental_args.get("fresca_freq_cutoff", 20)
 
+            bidirectional_sampling = experimental_args.get("bidirectional_sampling", False)
+            if bidirectional_sampling:
+                import copy
+                sample_scheduler_flipped = copy.deepcopy(sample_scheduler)
+
+        #rope
+        freqs = None
+        transformer.rope_embedder.k = None
+        transformer.rope_embedder.num_frames = None
+        if "default" in rope_function or bidirectional_sampling:
+            d = transformer.dim // transformer.num_heads
+            freqs = torch.cat([
+                rope_params(1024, d - 4 * (d // 6), L_test=latent_video_length, k=riflex_freq_index),
+                rope_params(1024, 2 * (d // 6)),
+                rope_params(1024, 2 * (d // 6))
+            ],
+            dim=1)
+        elif "comfy" in rope_function:
+            transformer.rope_embedder.k = riflex_freq_index
+            transformer.rope_embedder.num_frames = latent_video_length
+           
+        transformer.rope_func = rope_function
+        for block in transformer.blocks:
+            block.rope_func = rope_function
+        if transformer.vace_layers is not None:
+            for block in transformer.vace_blocks:
+                block.rope_func = rope_function
+
         #region model pred
         def predict_with_cfg(z, cfg_scale, positive_embeds, negative_embeds, timestep, idx, image_cond=None, clip_fea=None, 
                              control_latents=None, vace_data=None, unianim_data=None, audio_proj=None, control_camera_latents=None, 
-                             add_cond=None, cache_state=None, context_window=None, multitalk_audio_embeds=None, fantasy_portrait_input=None):
+                             add_cond=None, cache_state=None, context_window=None, multitalk_audio_embeds=None, fantasy_portrait_input=None, reverse_time=False):
             nonlocal transformer
             z = z.to(dtype)
             with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=("fp8" in model["quantization"])):
@@ -2325,8 +2334,14 @@ class WanVideoSampler:
                 elif ATI_tracks is not None and ((ati_start_percent <= current_step_percentage <= ati_end_percent) or 
                               (ati_end_percent > 0 and idx == 0 and current_step_percentage >= ati_start_percent)):
                     image_cond_input = image_cond_ati.to(z)
-                else:
-                    image_cond_input = image_cond.to(z) if image_cond is not None else None
+                elif image_cond is not None:
+                    if reverse_time: # Flip the image condition
+                        image_cond_input = torch.cat([
+                            torch.flip(image_cond[:4], dims=[1]), 
+                            torch.flip(image_cond[4:], dims=[1])
+                        ]).to(z)
+                    else:
+                        image_cond_input = image_cond.to(z)
 
                 if control_camera_latents is not None:
                     if (control_camera_start_percent <= current_step_percentage <= control_camera_end_percent) or \
@@ -2443,6 +2458,7 @@ class WanVideoSampler:
                     "inner_t": [shot_len] if shot_len else None,
                     "standin_input": standin_input,
                     "fantasy_portrait_input": fantasy_portrait_input,
+                    "reverse_time": reverse_time
                 }
 
                 batch_size = 1
@@ -2701,6 +2717,10 @@ class WanVideoSampler:
                             mask = mask.to(latent)
                             latent = image_latent * mask + latent * (1-mask)
                             # end diff diff
+
+                    if bidirectional_sampling:
+                        latent_flipped = torch.flip(latent, dims=[1])
+                        latent_model_input_flipped = latent_flipped.to(device)
 
                     latent_model_input = latent.to(device)
 
@@ -3238,6 +3258,14 @@ class WanVideoSampler:
                             text_embeds["negative_prompt_embeds"], 
                             timestep, idx, image_cond, clip_fea, control_latents, vace_data, unianim_data, audio_proj, control_camera_latents, add_cond,
                             cache_state=self.cache_state, fantasy_portrait_input=fantasy_portrait_input)
+                        if bidirectional_sampling:
+                            noise_pred_flipped, self.cache_state = predict_with_cfg(
+                            latent_model_input_flipped, 
+                            cfg[idx], 
+                            text_embeds["prompt_embeds"], 
+                            text_embeds["negative_prompt_embeds"], 
+                            timestep, idx, image_cond, clip_fea, control_latents, vace_data, unianim_data, audio_proj, control_camera_latents, add_cond,
+                            cache_state=self.cache_state, fantasy_portrait_input=fantasy_portrait_input, reverse_time=True)
 
                     if latent_shift_loop:
                         #reverse latent shift
@@ -3277,7 +3305,15 @@ class WanVideoSampler:
                                 timestep,
                                 latent[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else latent.unsqueeze(0),
                                 **scheduler_step_args)[0].squeeze(0)
-                        
+                            if noise_pred_flipped is not None:
+                                latent_backwards = sample_scheduler_flipped.step(
+                                    noise_pred_flipped.unsqueeze(0),
+                                    timestep,
+                                    latent_flipped.unsqueeze(0),
+                                    **scheduler_step_args)[0].squeeze(0)
+                                latent_backwards = torch.flip(latent_backwards, dims=[1])
+                                latent = latent * 0.5 + latent_backwards * 0.5
+
                         if freeinit_args is not None:
                             current_latent = latent.clone()
 

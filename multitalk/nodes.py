@@ -84,7 +84,7 @@ class MultiTalkWav2VecEmbeds:
             "wav2vec_model": ("WAV2VECMODEL",),
             "audio_1": ("AUDIO",),
             "normalize_loudness": ("BOOLEAN", {"default": True}),
-            "num_frames": ("INT", {"default": 81, "min": 1, "max": 1000, "step": 1}),
+            "num_frames": ("INT", {"default": 81, "min": 1, "max": 10000, "step": 1}),
             "fps": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
             "audio_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "Strength of the audio conditioning"}),
             "audio_cfg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "When not 1.0, an extra model pass without audio conditioning is done: slower inference but more motion is allowed"}),
