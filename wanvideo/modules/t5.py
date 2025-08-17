@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from comfy.utils import ProgressBar
+from ...utils import log
 
 from .tokenizers import HuggingfaceTokenizer
 
@@ -507,6 +508,8 @@ class T5EncoderModel:
     def __call__(self, texts, device):
         ids, mask = self.tokenizer(
             texts, return_mask=True, add_special_tokens=True)
+        for i, m in enumerate(mask.sum(dim=1)):
+            log.info(f"tokens: {m.item()}")
         ids = ids.to(device)
         mask = mask.to(device)
         seq_lens = mask.gt(0).sum(dim=1).long()
