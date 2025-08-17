@@ -1,4 +1,3 @@
-import os.path as osp
 from abc import ABCMeta, abstractmethod
 
 import cv2
@@ -305,11 +304,11 @@ class NanoDetABC(metaclass=ABCMeta):
 
 
 class FaceDet(NanoDetABC):
-    def __init__(self, model_path="", gpu_id=None, *args, **kwargs):
+    def __init__(self, model_path="", providers=["CUDAExecutionProvider"], *args, **kwargs):
         super(FaceDet, self).__init__(*args, **kwargs)
 
         self.model_path = model_path
-        self.ort_session = create_onnx_session(model_path, gpu_id=gpu_id)
+        self.ort_session = create_onnx_session(model_path, providers=providers)
         self.input_name = self.ort_session.get_inputs()[0].name
 
     def infer_image(self, img_input):

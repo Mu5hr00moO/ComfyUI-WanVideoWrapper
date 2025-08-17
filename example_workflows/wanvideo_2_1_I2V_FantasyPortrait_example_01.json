@@ -1006,7 +1006,7 @@
         "WanVideo\\fp8_scaled_kj\\I2V\\Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors",
         "fp16_fast",
         "disabled",
-        "main_device",
+        "offload_device",
         "sageattn"
       ],
       "color": "#223",

@@ -7,11 +7,11 @@ from .face_utils import (create_onnx_session, get_warp_mat_bbox,
 
 
 class FaceAlignment(object):
-    def __init__(self, gpu_id=None, alignment_model_path="", det_model_path=""):
+    def __init__(self, providers=["CUDAExecutionProvider"], alignment_model_path="", det_model_path=""):
         expand_ratio = 0.15
 
         self.face_alignment_net_222 = create_onnx_session(
-            alignment_model_path, gpu_id=gpu_id
+            alignment_model_path, providers=providers
         )
         self.onnx_input_name_222 = self.face_alignment_net_222.get_inputs()[0].name
         self.onnx_output_name_222 = [
@@ -19,7 +19,7 @@ class FaceAlignment(object):
         ]
         self.face_image_size = 128
 
-        self.face_detector = FaceDet(det_model_path, gpu_id=gpu_id)
+        self.face_detector = FaceDet(det_model_path, providers=providers)
         self.expand_ratio = expand_ratio
 
     def onnx_infer(self, input_uint8):

@@ -1,8 +1,5 @@
 import math
-import os.path as osp
-
 import numpy as np
-
 
 def smoothing_factor(t_e, cutoff):
     r = 2 * math.pi * cutoff * t_e
