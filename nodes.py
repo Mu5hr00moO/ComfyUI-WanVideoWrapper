@@ -6,6 +6,7 @@ from tqdm import tqdm
 import inspect
 import hashlib
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+import comfy.samplers
 
 from .wanvideo.modules.model import rope_params
 from .custom_linear import remove_lora_from_module, set_lora_params
@@ -1476,7 +1477,9 @@ class WanVideoExperimentalArgs:
                 "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
                 "use_tcfg": ("BOOLEAN", {"default": False, "tooltip": "https://arxiv.org/abs/2503.18137 TCFG: Tangential Damping Classifier-free Guidance. CFG artifacts reduction."}),
                 "raag_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Alpha value for RAAG, 1.0 is default, 0.0 is disabled."}),
-                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"})
+                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"}),
+                "scheduler": (comfy.samplers.SCHEDULER_NAMES, {"default": "normal"}),
+                "sampler_name": (comfy.samplers.SAMPLER_NAMES, {"default": "euler"}),
             },
         }
 
@@ -1631,9 +1634,16 @@ class WanVideoSampler:
         #region Scheduler
         sample_scheduler = None
         if scheduler != "multitalk":
-            sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+            if scheduler != "ComfyUI":
+                sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)                
+            else:
+                if(experimental_args is not None):
+                    comfy_string = f"{experimental_args.get('sampler_name')}/{experimental_args.get('scheduler')}"
+                    sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas, comfy_string=comfy_string)  
+                else:
+                    raise Exception("You need to connect WanVideoExperimentalArgs -node to use ComfyUI schedulers")
             log.info(f"scheduler: {scheduler} | shift: {shift}")
-            log.info(f"sigmas: {sample_scheduler.sigmas}")
+            log.info(f"sigmas: {sample_scheduler.sigmas}")          
         else:
             timesteps = torch.tensor([1000, 750, 500, 250], device=device)
         

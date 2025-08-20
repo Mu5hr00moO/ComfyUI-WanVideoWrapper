@@ -23,10 +23,11 @@ scheduler_list = [
     "flowmatch_distill",
     "flowmatch_pusa",
     "lightning_euler", "lightning_euler/beta", "lightning_euler/beta57",
-    "multitalk"
+    "multitalk",
+    "ComfyUI"
 ]
 
-def get_scheduler(scheduler, steps, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None):
+def get_scheduler(scheduler, steps, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None, comfy_string=None):
     timesteps = None
     if 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -119,6 +120,9 @@ def get_scheduler(scheduler, steps, shift, device, transformer_dim, flowedit_arg
 
         sample_scheduler.set_timesteps(num_inference_steps=steps, device=device)
         timesteps = sample_scheduler.timesteps[:-1].clone()
+    elif scheduler == "ComfyUI":
+        sample_scheduler = None
+        timesteps = None    
     elif scheduler == 'res_multistep':
         sample_scheduler = FlowMatchSchedulerResMultistep(shift=shift)
         sample_scheduler.set_timesteps(steps, denoising_strength=denoise_strength, sigmas=sigmas[:-1].tolist() if sigmas is not None else None)
