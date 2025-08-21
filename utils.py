@@ -208,6 +208,18 @@ def apply_lora(model, device_to, transformer_load_device, params_to_keep=None, d
                         continue
             m.comfy_patched_weights = True
             pbar.update(1)
+        
+        # After LoRA patching, scale weights that have scale_weight but are NOT LoRA patched
+        if len(scale_weights) > 0 and not getattr(model, "scale_weights_applied", False):
+            for name, param in model.model.diffusion_model.named_parameters():
+                scale_key = name.replace("weight", "scale_weight").replace("diffusion_model.", "") if "weight" in name else None
+                full_param_name = f"diffusion_model.{name}"
+                if scale_key and scale_key in scale_weights and full_param_name not in model.patches:
+                    scale = scale_weights[scale_key]
+                    param_fp32 = param.to(torch.float32)
+                    param_fp32.mul_(scale.to(param.device, torch.float32))
+                    param.copy_(param_fp32.to(param.dtype))
+            model.scale_weights_applied = True
       
         model.current_weight_patches_uuid = model.patches_uuid
         if low_mem_load:

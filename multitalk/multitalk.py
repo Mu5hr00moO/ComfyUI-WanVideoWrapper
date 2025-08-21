@@ -2,7 +2,6 @@ from diffusers import ModelMixin, ConfigMixin
 from einops import rearrange, repeat
 import torch
 import torch.nn as nn
-from functools import lru_cache
 from ..wanvideo.modules.attention import attention
 
 from comfy import model_management as mm
@@ -118,8 +117,6 @@ class RotaryPositionalEmbedding1D(nn.Module):
         self.head_dim = head_dim
         self.base = 10000
 
-
-    #@lru_cache(maxsize=32)
     def precompute_freqs_cis_1d(self, pos_indices):
 
         freqs = 1.0 / (self.base ** (torch.arange(0, self.head_dim, 2)[: (self.head_dim // 2)].float() / self.head_dim))
@@ -253,9 +250,16 @@ class SingleStreamAttention(nn.Module):
         self.attention_mode = attention_mode
 
     def forward(self, x: torch.Tensor, encoder_hidden_states: torch.Tensor, shape=None, enable_sp=False, kv_seq=None) -> torch.Tensor:
-       
         N_t, N_h, N_w = shape
-        x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
+
+        x_extra = None
+        try:
+            x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
+        except:
+            x_extra = x[:, -N_h * N_w:, :]
+            x = x[:, :-N_h * N_w, :]
+            N_t = N_t - 1
+            x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
 
         # get q for hidden_state
         B, N, C = x.shape
@@ -282,17 +286,18 @@ class SingleStreamAttention(nn.Module):
             encoder_v.transpose(1, 2),
             attention_mode=self.attention_mode
             )
-        #x = torch.nn.functional.scaled_dot_product_attention(
-        #    q, encoder_k, encoder_v, attn_mask=None, is_causal=False, dropout_p=0.0)
 
         # linear transform
         x_output_shape = (B, N, C)
         #x = x.transpose(1, 2) 
         x = x.reshape(x_output_shape) 
         x = self.proj(x)
-        x = self.proj_drop(x)
+        x = self.proj_drop(x)        
 
         x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+    
+        if x_extra is not None:
+            x = torch.cat([x, torch.zeros_like(x_extra)], dim=1)
 
         return x
     
@@ -360,8 +365,14 @@ class SingleStreamMultiAttention(SingleStreamAttention):
         if human_num is None or human_num <= 1:
             return super().forward(x, encoder_hidden_states, shape)
 
-        N_t, _, _ = shape
+        N_t, N_h, N_w = shape
         x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
+
+        x_extra = None
+        if x.shape[0] != encoder_hidden_states.shape[0]:
+            x_extra = x[:, -N_h * N_w:, :]
+            x = x[:, :-N_h * N_w, :]
+            N_t = N_t - 1
 
         # Query projection
         B, N, C = x.shape
@@ -473,5 +484,7 @@ class SingleStreamMultiAttention(SingleStreamAttention):
 
         # Restore original layout
         x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+        if x_extra is not None:
+            x = torch.cat([x, torch.zeros_like(x_extra)], dim=1)
 
         return x
