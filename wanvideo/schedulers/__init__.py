@@ -11,6 +11,37 @@ from .fm_solvers_euler import EulerScheduler
 import numpy as np
 from ...utils import log
 
+# ===================================================================
+# THE ADAPTER SKELETON
+# ===================================================================
+# class RES4LYFWrapperScheduler:
+#     def __init__(self, sampler_name, scheduler_name, steps, device, denoise=1.0, **kwargs):
+#         """
+#         This is the constructor for our adapter. For now, it only logs its creation.
+#         """
+#         log.info(f"--- RES4LYF ADAPTER CREATED ---")
+#         log.info(f"Received sampler_name: {sampler_name}, scheduler_name: {scheduler_name}")
+        
+#         # We will fill this in later.
+#         self.timesteps = torch.linspace(1000, 0, steps + 1)[:-1].to(torch.int64)
+
+#     def scale_noise(self, original_image, timesteps, noise):
+#         """
+#         Placeholder for scale_noise. Returns the original image for now.
+#         """
+#         log.warning("ADAPTER: .scale_noise() is not implemented yet.")
+#         return original_image
+
+#     def step(self, model_output, timestep, sample, **kwargs):
+#         """
+#         Placeholder for the step method. Returns the unmodified sample.
+#         """
+#         log.warning("ADAPTER: .step() is not implemented yet.")
+        
+#         # We MUST return a tuple, because your code calls ...step(...)[0]
+#         return (sample,)
+# ===================================================================
+
 scheduler_list = [
     "unipc", "unipc/beta",
     "dpm++", "dpm++/beta",
@@ -24,10 +55,10 @@ scheduler_list = [
     "flowmatch_pusa",
     "lightning_euler", "lightning_euler/beta", "lightning_euler/beta57",
     "multitalk",
-    "ComfyUI"
+    "RES4LYF"
 ]
 
-def get_scheduler(scheduler, steps, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None, comfy_string=None):
+def get_scheduler(scheduler, steps, shift, device, transformer_dim, flowedit_args, denoise_strength, sigmas=None, res4lyf_sampler_name=None, res4lyf_scheduler_name=None):
     timesteps = None
     if 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
@@ -120,9 +151,16 @@ def get_scheduler(scheduler, steps, shift, device, transformer_dim, flowedit_arg
 
         sample_scheduler.set_timesteps(num_inference_steps=steps, device=device)
         timesteps = sample_scheduler.timesteps[:-1].clone()
-    elif scheduler == "ComfyUI":
-        sample_scheduler = None
-        timesteps = None    
+    # elif 'RES4LYF' in scheduler:        
+    #     log.info("Hooking up the RES4LYFWrapperScheduler.")
+    #     adapter = RES4LYFWrapperScheduler(
+    #         sampler_name=res4lyf_sampler_name,
+    #         scheduler_name=res4lyf_scheduler_name,
+    #         steps=steps,
+    #         device=device,
+    #         denoise=denoise_strength
+    #     )
+    #     return adapter, adapter.timesteps
     elif scheduler == 'res_multistep':
         sample_scheduler = FlowMatchSchedulerResMultistep(shift=shift)
         sample_scheduler.set_timesteps(steps, denoising_strength=denoise_strength, sigmas=sigmas[:-1].tolist() if sigmas is not None else None)

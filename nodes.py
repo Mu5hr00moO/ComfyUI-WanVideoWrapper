@@ -28,6 +28,8 @@ from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
 import folder_paths
 
+from .RES4LYFwrapper.utils  import get_res4lyf_default_sampler_name, get_res4lyf_sampler_name_list, get_res4lyf_scheduler_list
+
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
 device = mm.get_torch_device()
@@ -1477,9 +1479,9 @@ class WanVideoExperimentalArgs:
                 "fresca_freq_cutoff": ("INT", {"default": 20, "min": 0, "max": 10000, "step": 1}),
                 "use_tcfg": ("BOOLEAN", {"default": False, "tooltip": "https://arxiv.org/abs/2503.18137 TCFG: Tangential Damping Classifier-free Guidance. CFG artifacts reduction."}),
                 "raag_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Alpha value for RAAG, 1.0 is default, 0.0 is disabled."}),
-                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"}),
-                "scheduler": (comfy.samplers.SCHEDULER_NAMES, {"default": "normal"}),
-                "sampler_name": (comfy.samplers.SAMPLER_NAMES, {"default": "euler"}),
+                "bidirectional_sampling": ("BOOLEAN", {"default": False, "tooltip": "Enable bidirectional sampling, based on https://github.com/ff2416/WanFM"}),                
+                "sampler_name": (get_res4lyf_sampler_name_list(), {"default": get_res4lyf_default_sampler_name()}), 
+                "scheduler": (get_res4lyf_scheduler_list(), {"default": "beta57"},),
             },
         }
 
@@ -1634,12 +1636,11 @@ class WanVideoSampler:
         #region Scheduler
         sample_scheduler = None
         if scheduler != "multitalk":
-            if scheduler != "ComfyUI":
+            if scheduler != "RES4LYF":
                 sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)                
             else:
                 if(experimental_args is not None):
-                    comfy_string = f"{experimental_args.get('sampler_name')}/{experimental_args.get('scheduler')}"
-                    sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas, comfy_string=comfy_string)  
+                    sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas, sampler_name=experimental_args.get('sampler_name'), scheduler_name=experimental_args.get('scheduler'))  
                 else:
                     raise Exception("You need to connect WanVideoExperimentalArgs -node to use ComfyUI schedulers")
             log.info(f"scheduler: {scheduler} | shift: {shift}")
