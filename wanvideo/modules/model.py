@@ -96,18 +96,21 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
     
     return xq_out, xk_out
 
-def rope_riflex(pos, dim, theta, L_test, k, temporal):
+def rope_riflex(pos, dim, i, theta, L_test, k, ntk_factor=1.0):
     assert dim % 2 == 0
     if mm.is_device_mps(pos.device) or mm.is_intel_xpu() or mm.is_directml_enabled():
         device = torch.device("cpu")
     else:
         device = pos.device
 
+    if ntk_factor != 1.0:
+        theta *= ntk_factor
+
     scale = torch.linspace(0, (dim - 2) / dim, steps=dim//2, dtype=torch.float64, device=device)
     omega = 1.0 / (theta**scale)
 
     # RIFLEX modification - adjust last frequency component if L_test and k are provided
-    if temporal and k > 0 and L_test:
+    if i==0 and k > 0 and L_test:
         omega[k-1] = 0.9 * 2 * torch.pi / L_test
 
     out = torch.einsum("...n,d->...nd", pos.to(dtype=torch.float32, device=device), omega)
@@ -124,10 +127,18 @@ class EmbedND_RifleX(nn.Module):
         self.num_frames = num_frames
         self.k = k
 
-    def forward(self, ids):
+    def forward(self, ids, ntk_factor=[1.0,1.0,1.0]):
         n_axes = ids.shape[-1]
         emb = torch.cat(
-            [rope_riflex(ids[..., i], self.axes_dim[i], self.theta, self.num_frames, self.k, temporal=True if i == 0 else False) for i in range(n_axes)],
+            [rope_riflex(
+                ids[..., i], 
+                self.axes_dim[i], 
+                i, #f h w
+                self.theta, 
+                self.num_frames, 
+                self.k,
+                ntk_factor[i])
+            for i in range(n_axes)],
             dim=-3,
         )
         return emb.unsqueeze(1)
@@ -1532,7 +1543,8 @@ class WanModel(torch.nn.Module):
         inner_t=None,
         standin_input=None,
         fantasy_portrait_input=None,
-        reverse_time=False
+        reverse_time=False,
+        ntk_alphas = [1.0, 1.0, 1.0]
     ):
         r"""
         Forward pass through the diffusion model
@@ -1675,7 +1687,8 @@ class WanModel(torch.nn.Module):
             if (self.cached_freqs is not None and 
                 self.cached_shape == current_shape and 
                 self.cached_cond == has_cond and
-                self.cached_rope_k == self.rope_embedder.k
+                self.cached_rope_k == self.rope_embedder.k and
+                self.cached_ntk_alphas == ntk_alphas
                 ):
                 freqs = self.cached_freqs
             else:
@@ -1706,15 +1719,16 @@ class WanModel(torch.nn.Module):
                     combined_img_ids = torch.cat([img_ids, cond_img_ids], dim=1)
                     
                     # Generate RoPE frequencies for the combined positions
-                    freqs = self.rope_embedder(combined_img_ids).movedim(1, 2)
+                    freqs = self.rope_embedder(combined_img_ids, ntk_alphas).movedim(1, 2)
                 else:
                     img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=1)
-                    freqs = self.rope_embedder(img_ids).movedim(1, 2)
+                    freqs = self.rope_embedder(img_ids, ntk_alphas).movedim(1, 2)
 
                 self.cached_freqs = freqs
                 self.cached_shape = current_shape
                 self.cached_cond = has_cond
                 self.cached_rope_k = self.rope_embedder.k
+                self.cached_ntk_alphas = ntk_alphas
 
         # Stand-In RoPE frequencies
         if x_ip is not None:

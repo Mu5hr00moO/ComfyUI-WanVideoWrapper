@@ -1533,7 +1533,37 @@ class WanVideoScheduler: #WIP
 
     def process(self, scheduler):
         return (scheduler,)
-    
+
+rope_functions = ["default", "comfy", "comfy_chunked"]
+class WanVideoRoPEFunction: #WIP
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "rope_function": (rope_functions, {"default": "comfy"}),
+                "ntk_scale_f": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01}),
+                "ntk_scale_h": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01}),
+                "ntk_scale_w": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = (rope_functions, )
+    RETURN_NAMES = ("rope_function",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+    EXPERIMENTAL = True
+
+    def process(self, rope_function, ntk_scale_f, ntk_scale_h, ntk_scale_w):
+        if ntk_scale_f != 1.0 or ntk_scale_h != 1.0 or ntk_scale_w != 1.0:
+            rope_func_dict = {
+                "rope_function": rope_function,
+                "ntk_scale_f": ntk_scale_f,
+                "ntk_scale_h": ntk_scale_h,
+                "ntk_scale_w": ntk_scale_w,
+            }
+            return (rope_func_dict,)
+        return (rope_function,)
+
+
 #region Sampler
 class WanVideoSampler:
     @classmethod
@@ -1560,7 +1590,7 @@ class WanVideoSampler:
                 "flowedit_args": ("FLOWEDITARGS", ),
                 "batched_cfg": ("BOOLEAN", {"default": False, "tooltip": "Batch cond and uncond for faster sampling, possibly faster on some hardware, uses more memory"}),
                 "slg_args": ("SLGARGS", ),
-                "rope_function": (["default", "comfy", "comfy_chunked"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile. Chunked version has reduced peak VRAM usage when not using torch.compile"}),
+                "rope_function": (rope_functions, {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile. Chunked version has reduced peak VRAM usage when not using torch.compile"}),
                 "loop_args": ("LOOPARGS", ),
                 "experimental_args": ("EXPERIMENTALARGS", ),
                 "sigmas": ("SIGMAS", ),
@@ -1651,7 +1681,7 @@ class WanVideoSampler:
             log.info(f"sigmas: {sample_scheduler.sigmas}")          
         else:
             timesteps = torch.tensor([1000, 750, 500, 250], device=device)
-        
+        total_steps = steps
         steps = len(timesteps)
 
         if end_step != -1 and start_step >= end_step:
@@ -2055,8 +2085,8 @@ class WanVideoSampler:
                input_samples = torch.cat([input_samples[:, :1].repeat(1, noise.shape[1] - input_samples.shape[1], 1, 1), input_samples], dim=1)
             
             if add_noise_to_samples:
-               latent_timestep = timesteps[:1].to(noise)
-               noise = noise * latent_timestep / 1000 + (1 - latent_timestep / 1000) * input_samples
+                latent_timestep = timesteps[:1].to(noise)
+                noise = noise * latent_timestep / 1000 + (1 - latent_timestep / 1000) * input_samples
             else:
                 noise = input_samples
 
@@ -2122,10 +2152,7 @@ class WanVideoSampler:
             set_enhance_weight(feta_args["weight"])
             feta_start_percent = feta_args["start_percent"]
             feta_end_percent = feta_args["end_percent"]
-            if context_options is not None:
-                set_num_frames(context_frames)
-            else:
-                set_num_frames(latent_video_length)
+            set_num_frames(latent_video_length) if context_options is None else set_num_frames(context_frames)
             enhance_enabled = True
         else:
             feta_args = None
@@ -2279,6 +2306,11 @@ class WanVideoSampler:
                 sample_scheduler_flipped = copy.deepcopy(sample_scheduler)
 
         #rope
+        ntk_alphas = [1.0, 1.0, 1.0]
+        if isinstance(rope_function, dict):
+            ntk_alphas = rope_function["ntk_scale_f"], rope_function["ntk_scale_h"], rope_function["ntk_scale_w"]
+            rope_function = rope_function["rope_function"]
+            
         freqs = None
         transformer.rope_embedder.k = None
         transformer.rope_embedder.num_frames = None
@@ -2472,7 +2504,8 @@ class WanVideoSampler:
                     "inner_t": [shot_len] if shot_len else None,
                     "standin_input": standin_input,
                     "fantasy_portrait_input": fantasy_portrait_input,
-                    "reverse_time": reverse_time
+                    "reverse_time": reverse_time,
+                    "ntk_alphas": ntk_alphas
                 }
 
                 batch_size = 1
@@ -2588,13 +2621,13 @@ class WanVideoSampler:
                     raise e
 
                 #https://github.com/WeichenFan/CFG-Zero-star/
+                alpha = 1.0
                 if use_cfg_zero_star:
                     alpha = optimized_scale(
                         noise_pred_cond.view(batch_size, -1),
                         noise_pred_uncond.view(batch_size, -1)
                     ).view(batch_size, 1, 1, 1)
-                else:
-                    alpha = 1.0
+                    
                 
                 noise_pred_uncond_scaled = noise_pred_uncond * alpha
 
@@ -2633,7 +2666,7 @@ class WanVideoSampler:
 
         intermediate_device = device
 
-        # diff diff prep
+        # Differential diffusion prep
         masks = None
         if not multitalk_sampling and samples is not None and noise_mask is not None:
             thresholds = torch.arange(len(timesteps), dtype=original_image.dtype) / len(timesteps)
@@ -2688,10 +2721,8 @@ class WanVideoSampler:
 
                 # Generate new random noise
                 z_rand = torch.randn(z_T.shape, dtype=torch.float32, generator=seed_g, device=torch.device("cpu"))
-
                 # Apply frequency mixing
-                current_latent = freq_mix_3d(z_T.to(torch.float32), z_rand.to(device), LPF=freq_filter)
-                current_latent = current_latent.to(dtype)
+                current_latent = (freq_mix_3d(z_T.to(torch.float32), z_rand.to(device), LPF=freq_filter)).to(dtype)
 
             # Store initial noise for first iteration
             if freeinit_args is not None and iter_idx == 0:
@@ -3810,7 +3841,8 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoLatentReScale": WanVideoLatentReScale,
     "WanVideoScheduler": WanVideoScheduler,
     "WanVideoAddStandInLatent": WanVideoAddStandInLatent,
-    "WanVideoAddControlEmbeds": WanVideoAddControlEmbeds
+    "WanVideoAddControlEmbeds": WanVideoAddControlEmbeds,
+    "WanVideoRoPEFunction": WanVideoRoPEFunction
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
@@ -3844,5 +3876,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoLatentReScale": "WanVideo Latent ReScale",
     "WanVideoScheduler": "WanVideo Scheduler Selector",
     "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",
-    "WanVideoAddControlEmbeds": "WanVideo Add Control Embeds"
+    "WanVideoAddControlEmbeds": "WanVideo Add Control Embeds",
+    "WanVideoRoPEFunction": "WanVideo RoPE Function"
     }
