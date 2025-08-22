@@ -1208,7 +1208,7 @@ class WanVideoModelLoader:
                     desc=f"Loading transformer parameters to {transformer_load_device}", 
                     total=param_count,
                     leave=True):
-                if "loras" in name:
+                if "loras" in name or "dwpose" in name or "randomref" in name:
                     continue
                 #print(name, param.dtype, param.device, param.shape)
                 if isinstance(param, GGUFParameter):
