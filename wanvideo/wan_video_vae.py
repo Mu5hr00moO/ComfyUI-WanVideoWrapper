@@ -1406,7 +1406,7 @@ class VideoVAE38_(VideoVAE_):
                                     attn_scales, self.temperal_upsample, dropout)
 
 
-    def encode(self, x, pbar=False):
+    def encode(self, x, pbar=True):
         self.clear_cache()
         x = patchify(x, patch_size=2)
         t = x.shape[2]
@@ -1434,7 +1434,7 @@ class VideoVAE38_(VideoVAE_):
         return mu
 
 
-    def decode(self, z, pbar=False):
+    def decode(self, z, pbar=True):
         self.clear_cache()
         z = z / self.inv_std.to(z) + self.mean.to(z)
        
