@@ -267,7 +267,7 @@ class WanVideoLatentReScale:
     RETURN_NAMES = ("samples",)
     FUNCTION = "encode"
     CATEGORY = "WanVideoWrapper"
-    DESCRIPTION = "Rescale latents to match the expected range for encoding or decoding. Can be used to "
+    DESCRIPTION = "Rescale latents to match the expected range for encoding or decoding between native ComfyUI VAE and the WanVideoWrapper VAE."
 
     def encode(self, samples, direction):
         samples = samples.copy()

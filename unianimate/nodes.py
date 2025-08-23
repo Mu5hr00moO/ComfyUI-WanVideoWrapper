@@ -37,17 +37,18 @@ def update_transformer(transformer, state_dict):
                 nn.SiLU(),
                 nn.Conv2d(concat_dim * 4, randomref_dim, 3, stride=2, padding=1),
                 )
+    unianimate_sd = {}
     state_dict_new = {}
     for key in list(state_dict.keys()):
         if "dwpose_embedding" in key:
-            state_dict_new[key.split("dwpose_embedding.")[1]] = state_dict.pop(key)
-    transformer.dwpose_embedding.load_state_dict(state_dict_new, strict=True)
-    state_dict_new = {}
+            state_dict_new[key] = state_dict.pop(key)
+    unianimate_sd.update(state_dict_new)
     for key in list(state_dict.keys()):
         if "randomref_embedding_pose" in key:
-            state_dict_new[key.split("randomref_embedding_pose.")[1]] = state_dict.pop(key)
-    transformer.randomref_embedding_pose.load_state_dict(state_dict_new,strict=True)
-    return transformer
+            state_dict_new[key] = state_dict.pop(key)
+    unianimate_sd.update(state_dict_new)
+    del state_dict_new
+    return transformer, unianimate_sd
 
 # Openpose
 # Original from CMU https://github.com/CMU-Perceptual-Computing-Lab/openpose

@@ -1106,6 +1106,7 @@ class WanVideoModelLoader:
         patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
         patcher.model.is_patched = False
 
+        unianimate_sd = None
         control_lora = False        
         if lora is not None:
             for l in lora:
@@ -1123,7 +1124,7 @@ class WanVideoModelLoader:
                 if "dwpose_embedding.0.weight" in lora_sd: #unianimate
                     from .unianimate.nodes import update_transformer
                     log.info("Unianimate LoRA detected, patching model...")
-                    transformer = update_transformer(transformer, lora_sd)
+                    transformer, unianimate_sd = update_transformer(transformer, lora_sd)
 
                 lora_sd = standardize_lora_key_format(lora_sd)
 
@@ -1192,6 +1193,13 @@ class WanVideoModelLoader:
                     low_mem_load=lora_low_mem_load, control_lora=control_lora, scale_weights=scale_weights)
                 scale_weights.clear()
                 patcher.patches.clear()
+
+        if unianimate_sd is not None:
+            sd.update(unianimate_sd)
+            for name, param in transformer.named_parameters():
+                if "dwpose_embedding" in name or "randomref_embedding_pose" in name:
+                    dtype_to_use = base_dtype
+                    set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
         
         if gguf:
             #from diffusers.quantizers.gguf.utils import _replace_with_gguf_linear, GGUFParameter
@@ -1208,7 +1216,7 @@ class WanVideoModelLoader:
                     desc=f"Loading transformer parameters to {transformer_load_device}", 
                     total=param_count,
                     leave=True):
-                if "loras" in name or "dwpose" in name or "randomref" in name:
+                if "loras" in name:
                     continue
                 #print(name, param.dtype, param.device, param.shape)
                 if isinstance(param, GGUFParameter):
