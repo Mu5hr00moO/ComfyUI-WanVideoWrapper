@@ -134,9 +134,6 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     sample_scheduler.full_sigmas = sample_scheduler.sigmas.clone()
     sample_scheduler.sigmas = sample_scheduler.sigmas[start_idx:start_idx+len(timesteps)+1]  # always one longer
     
-
-    log.info(f"Using timesteps: {timesteps}")
-    
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps
 

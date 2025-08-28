@@ -731,7 +731,8 @@ class WanVideoSetLoRAs:
 
 def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None, 
                  transformer_load_device=None, block_swap_args=None, gguf=False, reader=None, patcher=None):
-    params_to_keep = {"time_in", "patch_embedding", "time_", "modulation", "text_embedding", "adapter", "add", "ref_conv", "audio_proj"}
+    params_to_keep = {"time_in", "patch_embedding", "time_", "modulation", "text_embedding", 
+                      "adapter", "add", "ref_conv", "casual_audio_encoder", "cond_encoder", "frame_packer"}
     param_count = sum(1 for _ in transformer.named_parameters())
     pbar = ProgressBar(param_count)
     cnt = 0
@@ -878,6 +879,7 @@ def patch_stand_in_lora(transformer, lora_sd, transformer_load_device, base_dtyp
 
 def add_lora_weights(patcher, lora, base_dtype, merge_loras=False):
     unianimate_sd = None
+    control_lora=False
     #spacepxl's control LoRA patch
     for l in lora:
         log.info(f"Loading LoRA: {l['name']} with strength: {l['strength']}")
@@ -904,7 +906,6 @@ def add_lora_weights(patcher, lora, base_dtype, merge_loras=False):
         # Filter out any LoRA keys containing 'img' if the base model state_dict has no 'img' keys
         #if not any('img' in k for k in sd.keys()):
         #    lora_sd = {k: v for k, v in lora_sd.items() if 'img' not in k}
-        control_lora=False
         if "diffusion_model.patch_embedding.lora_A.weight" in lora_sd:
             control_lora = True
         #stand-in LoRA patch
@@ -1079,7 +1080,9 @@ class WanVideoModelLoader:
         ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
 
         model_type = "t2v"
-        if not "text_embedding.0.weight" in sd:
+        if "audio_injector.injector.0.k.weight" in sd:
+            model_type = "s2v"
+        elif not "text_embedding.0.weight" in sd:
             model_type = "no_cross_attn" #minimaxremover
         elif "model_type.Wan2_1-FLF2V-14B-720P" in sd or "img_emb.emb_pos" in sd or "flf2v" in model.lower():
             model_type = "fl2v"
@@ -1186,7 +1189,11 @@ class WanVideoModelLoader:
             "add_ref_conv": True if "ref_conv.weight" in sd else False,
             "in_dim_ref_conv": sd["ref_conv.weight"].shape[1] if "ref_conv.weight" in sd else None,
             "add_control_adapter": True if "control_adapter.conv.weight" in sd else False,
-            "use_motion_attn": True if "blocks.0.motion_attn.k.weight" in sd else False
+            "use_motion_attn": True if "blocks.0.motion_attn.k.weight" in sd else False,
+            "enable_adain": True if "audio_injector.injector_adain_layers.0.linear.weight" in sd else False,
+            "cond_dim": sd["cond_encoder.weight"].shape[1] if "cond_encoder.weight" in sd else 0,
+            "zero_timestep": model_type == "s2v",
+
         }
 
         with init_empty_weights():
